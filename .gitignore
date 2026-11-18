@@ -1,0 +1,16 @@
+.tools/
+.gradle/
+.kotlin/
+**/build/
+local.properties
+research/
+*.jks
+*.keystore
+.idea/
+*.iml
+outputs/
+.codex-attachments/
+*.apk
+*.idsig
+.env
+.env.*

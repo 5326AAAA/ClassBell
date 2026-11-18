@@ -11,7 +11,7 @@ Class Bell 是一个 Kotlin Android 课程提醒应用。它提供学习通通�
 安装 JDK 17 或 21、Android SDK Platform 35 和 Build Tools 35.0.0。通过 Android Studio 打开项目根目录，或把 `ANDROID_HOME` 指向 Android SDK。
 
 ```sh
-./gradlew :app:testDebugUnitTest :app:lintRelease :app:assembleRelease
+sh ./gradlew :app:testDebugUnitTest :app:lintRelease :app:assembleRelease
 ```
 
 Windows PowerShell 使用 `.\gradlew.bat`。首次运行会下载 Gradle 8.11.1 和构建依赖。Release APK 在 `app/build/outputs/apk/release/app-release-unsigned.apk`，安装和发行前请用自己的密钥签名。

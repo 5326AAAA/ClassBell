@@ -1,0 +1,41 @@
+<resources>
+    <style name="AppThemeBase" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:fontFamily">sans-serif</item>
+        <item name="android:colorAccent">#146B53</item>
+        <item name="android:colorControlHighlight">#22146B53</item>
+        <item name="android:colorButtonNormal">#E6F2EC</item>
+        <item name="android:alertDialogTheme">@style/BellDialogTheme</item>
+        <item name="android:editTextStyle">@style/BellEditText</item>
+        <item name="android:checkboxStyle">@style/BellCheckbox</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:statusBarColor">#F5F7F6</item>
+        <item name="android:navigationBarColor">#FFFFFF</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:windowBackground">#F5F7F6</item>
+    </style>
+    <style name="AppTheme" parent="AppThemeBase" />
+    <style name="BellDialogTheme" parent="android:style/Theme.Material.Light.Dialog.Alert">
+        <item name="android:fontFamily">sans-serif</item>
+        <item name="android:colorAccent">#146B53</item>
+        <item name="android:windowBackground">@drawable/dialog_surface</item>
+        <item name="android:windowMinWidthMajor">90%</item>
+        <item name="android:windowMinWidthMinor">90%</item>
+        <item name="android:textColorPrimary">#172D27</item>
+        <item name="android:textColorSecondary">#697C73</item>
+        <item name="android:editTextStyle">@style/BellEditText</item>
+        <item name="android:listChoiceIndicatorMultiple">@drawable/choice_multiple</item>
+    </style>
+    <style name="BellEditText" parent="android:style/Widget.Material.Light.EditText">
+        <item name="android:background">@drawable/input_field</item>
+        <item name="android:textColor">#172D27</item>
+        <item name="android:textColorHint">#697C73</item>
+        <item name="android:textSize">16sp</item>
+        <item name="android:minHeight">56dp</item>
+    </style>
+    <style name="BellCheckbox" parent="android:style/Widget.Material.Light.CompoundButton.CheckBox">
+        <item name="android:button">@drawable/choice_multiple</item>
+        <item name="android:minHeight">48dp</item>
+        <item name="android:drawablePadding">10dp</item>
+        <item name="android:textColor">#172D27</item>
+    </style>
+</resources>

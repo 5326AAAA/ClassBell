@@ -1,0 +1,8 @@
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@drawable/input_field" />
+    <item android:width="18dp" android:height="18dp" android:gravity="end|center_vertical" android:right="14dp">
+        <vector android:width="18dp" android:height="18dp" android:viewportWidth="24" android:viewportHeight="24">
+            <path android:pathData="M6,9 L12,15 L18,9" android:strokeColor="#146B53" android:strokeWidth="2" android:strokeLineCap="round" android:strokeLineJoin="round" android:fillColor="@android:color/transparent" />
+        </vector>
+    </item>
+</layer-list>

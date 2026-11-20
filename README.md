@@ -1,6 +1,7 @@
-# Class Bell
+# ClassBell：超星学习通课程提醒助手
 
-Class Bell 是一个 Kotlin Android 课程提醒应用。它提供学习通通知提醒、课程与作业查询，以及个人签到结果查看。
+ClassBell 是一款面向超星学习通（学习通、Chaoxing、Xuexitong）用户的 Kotlin Android 应用，提供课程提醒、学习通通知提醒、课程与作业查询，以及个人签到结果查看。
+
 
 ## 1.0.0
 

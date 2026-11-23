@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ClassBell 网页扫码</title>
+  <style>
+    :root { color-scheme: light dark; font: 16px system-ui, sans-serif; }
+    body { margin: 0; padding: 16px; }
+    h1 { margin: 0 0 8px; font-size: 1.25rem; }
+    p { margin: 8px 0; line-height: 1.55; }
+    button { background: #1748a6; color: white; border: 0; border-radius: 12px; min-height: 48px; padding: 8px 16px; font: inherit; }
+    button:disabled { opacity: .55; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    .actions button { flex: 1 1 8rem; }
+    .diagnostics { border-top: 1px solid #8888; margin-top: 16px; padding-top: 8px; font-size: .875rem; }
+  </style>
+  <script defer src="/classbell-scan.js"></script>
+</head>
+<body>
+  <main>
+    <h1>原生扫码测试</h1>
+    <p>用摄像头或相册识别二维码。网页只收到结果状态，不会提交签到。</p>
+    <div class="actions">
+      <button type="button" id="camera" disabled>摄像头扫码</button>
+      <button type="button" id="gallery" disabled>从相册识别</button>
+    </div>
+    <p id="status" role="status">正在连接原生扫码器…</p>
+    <p id="diagnostics" class="diagnostics">正在加载 Go 本地诊断…</p>
+  </main>
+</body>
+</html>

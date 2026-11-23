@@ -41,6 +41,7 @@ class MultiAccountSignTest {
         val bound=(1..2).map{i->accounts.bind("合成账号 $i",listOf(Cookie.Builder().name("_uid").value("90$i").domain("chaoxing.com").path("/").secure().build()),listOf(course))}
         val sends=mutableListOf<String>()
         val queries=mutableListOf<String>()
+        var confirmedReply=true
         val page=Intent(app,MultiAccountSignActivity::class.java).putExtra("courseKey",course.key).putExtra("activeId",item.id).putExtra("title",item.title).putExtra("otherId",0)
         val controller=Robolectric.buildActivity(MultiAccountSignActivity::class.java,page)
         controller.get().accountRepository=accounts
@@ -49,7 +50,7 @@ class MultiAccountSignTest {
             override fun plan(activity:SignActivity):SignPlan{guard();return SignPlan(SignMode.NORMAL,"普通签到")}
             override fun attendance(activity:SignActivity):SignOutcome {
                 guard();queries+=account.id
-                return if(account.id==bound.last().id)SignOutcome(true,"已确认签到")
+                return if(account.id==bound.last().id && confirmedReply)SignOutcome(true,"已确认签到")
                 else SignOutcome(false,"尚未签到",SignResultCategory.NOT_SUBMITTED)
             }
             override fun submit(activity:SignActivity,photo:File?,beforeCommit:()->Unit):SignOutcome {
@@ -67,7 +68,13 @@ class MultiAccountSignTest {
             button("核对所选账号的要求").performClick();await{text().contains("处理结束")}
             if(unbindFirst)accounts.unbind(bound.first().id)
             button("确认所选账号并提交").performClick()
-            ShadowAlertDialog.getLatestAlertDialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick()
+            val confirmation=ShadowAlertDialog.getLatestAlertDialog()
+            val panel=views(confirmation.window!!.decorView).filterIsInstance<TextView>().map{it.text.toString()}
+            assertTrue(panel.contains(course.name));assertTrue(panel.contains(item.title))
+            assertTrue(panel.contains(if(unbindFirst)"将提交 · 1" else "将提交 · 2"))
+            if(unbindFirst){assertTrue(panel.contains("将跳过 · 1"));assertTrue(panel.contains("账号已更新或解绑"))}
+            assertTrue(sends.isEmpty())
+            confirmation.getButton(AlertDialog.BUTTON_POSITIVE).performClick()
             await{text().contains("处理结束") && text().contains("成功 · 签到成功")}
             if(unbindFirst){assertEquals(listOf(bound.last().id),sends);assertTrue(text().contains("解绑"))}
             else {
@@ -82,6 +89,11 @@ class MultiAccountSignTest {
                 await{text().contains("处理结束") && text().contains("已确认签到")}
                 assertEquals(bound.map{it.id},queries)
                 assertTrue(text().contains("尚未签到"))
+                assertTrue(text().contains("结果待核实"))
+                confirmedReply=false
+                button("刷新所选账号的签到结果").performClick()
+                await{text().contains("处理结束") && queries.size==4}
+                assertTrue(text().contains("成功 · 已确认签到"))
                 assertFalse(button("确认所选账号并提交").isEnabled)
                 assertEquals(2,sends.size)
             }

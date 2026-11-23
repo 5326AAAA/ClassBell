@@ -83,6 +83,50 @@ class NativeMaterialUiTest {
             assertNull(shadowOf(activity).nextStartedActivity)
         }finally{controller.pause().stop().destroy();app.prefs.edit().clear().commit()}
     }
+    @Test fun singleAccountQrRoutesFromScannerToConfirmationAndResultWithoutLeavingClassBell() {
+        app.prefs.edit().clear().commit()
+        app.courseMemory.activate(app.prefs,accountKey("single-native-qr-flow"),listOf(course))
+        val sign=SignActivity("301","本次扫码用例",course,otherId=2)
+        val submissions=java.util.concurrent.atomic.AtomicInteger()
+        fun source(guard:()->Unit)=object:SignSource {
+            override fun activities(course:Course):List<SignActivity> { guard();return listOf(sign).filter{it.course==course} }
+            override fun plan(activity:SignActivity):SignPlan { guard();return SignPlan(SignMode.QR,"请扫描当前二维码") }
+            override fun submit(activity:SignActivity,photo:File?,beforeCommit:()->Unit)=throw AssertionError("Wrong route")
+            override fun submitQr(activity:SignActivity,qr:SignQr,fix:LocationFix?,beforeCommit:()->Unit):SignOutcome {
+                guard();qr.requireFor(activity);beforeCommit();submissions.incrementAndGet()
+                return SignOutcome(true,"测试服务端已确认")
+            }
+            override fun cancel(){}
+        }
+        val scanner=Robolectric.buildActivity(QrScanActivity::class.java)
+        scanner.get().lookupSourceFactory=::source
+        val scan=scanner.setup().get()
+        try {
+            scan.accept(raw)
+            assertNull(shadowOf(scan).nextStartedActivity)
+            views(scan.window.decorView).filterIsInstance<Button>().single{it.text=="核对课程并继续"}.performClick()
+            var intent:Intent?=null
+            await { intent=shadowOf(scan).nextStartedActivity;intent!=null }
+            assertEquals(SignActionActivity::class.java.name,intent!!.component?.className)
+            val detail=Robolectric.buildActivity(SignActionActivity::class.java,intent)
+            detail.get().sourceFactory=::source
+            val page=detail.setup().get();val root=page.window.decorView
+            try {
+                fun button()=views(root).filterIsInstance<Button>().firstOrNull{it.text=="确认二维码并提交"}
+                await { button()?.isEnabled==true }
+                button()!!.performClick()
+                assertEquals(0,submissions.get())
+                ShadowAlertDialog.getLatestAlertDialog().getButton(AlertDialog.BUTTON_NEGATIVE).performClick()
+                assertEquals(0,submissions.get())
+                button()!!.performClick()
+                ShadowAlertDialog.getLatestAlertDialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick()
+                await { views(root).filterIsInstance<TextView>().any{it.text=="测试服务端已确认"} }
+                assertEquals(1,submissions.get())
+                assertNull(button())
+                assertNull(shadowOf(page).nextStartedActivity)
+            } finally { detail.pause().stop().destroy() }
+        } finally { scanner.pause().stop().destroy();app.prefs.edit().clear().commit() }
+    }
     @Test fun batchQrReturnsToNativeFormAndSubmitsBothBoundAccounts()=batch(SignMode.QR)
     @Test fun batchGestureUsesProvidedPathForEachBoundAccount()=batch(SignMode.GESTURE)
     @Test fun boundScannerWorksWithoutMainLoginAndClosesAfterAccountRemoval() {

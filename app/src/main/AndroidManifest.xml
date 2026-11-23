@@ -35,6 +35,7 @@
         <activity android:name=".LocationDemoActivity" android:exported="false" />
         <activity android:name=".LocationPickerActivity" android:exported="false" android:windowSoftInputMode="adjustResize" />
         <activity android:name=".QrScanActivity" android:exported="false" />
+        <activity android:name=".LocalScanWebActivity" android:exported="false" />
         <activity android:name=".OfficialPageActivity" android:exported="false" android:windowSoftInputMode="adjustResize" />
         <activity android:name=".BoundAccountsActivity" android:exported="false" android:windowSoftInputMode="adjustResize" />
         <activity android:name=".AlertActivity" android:exported="false" android:excludeFromRecents="true"

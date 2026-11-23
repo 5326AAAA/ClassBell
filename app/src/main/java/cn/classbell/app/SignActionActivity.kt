@@ -2,6 +2,7 @@ package cn.classbell.app
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -27,9 +28,11 @@ class SignActionActivity:StudyActivity() {
     private var resultCheck:SignOutcome?=null
     private var plan:SignPlan?=null
     private var overview:SignOverview?=null
-    private var dialog:android.app.AlertDialog?=null
+    private var dialog:AlertDialog?=null
     private val monitoredPhoto get()=intent.getBooleanExtra("monitoredPhoto",false)
     private val historyOnly get()=intent.getBooleanExtra("historyOnly",false)
+    private val ended get()=historyOnly || overview?.status==2 || plan?.issueCode=="ACTIVITY_ENDED"
+    private fun submissionLocked()=lastOutcome?.locksSignSubmission==true || app.signing.ledger.attempted(sessionOwner,sign)
     override fun onCreate(savedInstanceState:Bundle?) {
         super.onCreate(savedInstanceState)
         if(!valid()){finish();return}
@@ -61,7 +64,6 @@ class SignActionActivity:StudyActivity() {
     }
     private fun render() {
         body.removeAllViews()
-        val ended=historyOnly || overview?.status==2 || plan?.issueCode=="ACTIVITY_ENDED"
         val info=StudyUi.card(this,body)
         val heading=LinearLayout(this).apply{gravity=android.view.Gravity.CENTER_VERTICAL}
         heading.addView(StudyUi.text(this,overview?.type ?: "课程签到",13,true,ModernUi.strongPrimary),
@@ -83,30 +85,31 @@ class SignActionActivity:StudyActivity() {
         field(info,"截止时间",end?.let(SignOverview::format) ?: "未提供")
         if(end==null && start==null)intent.getStringExtra("timeline")?.takeIf{it.isNotBlank()}
             ?.let{field(info,"活动记录",it)}
-        val count=metadata?.attendedCount?.takeUnless{it==0 && (resultCheck?.successful==true || lastOutcome?.successful==true)}
+        val count=metadata?.attendedCount?.takeUnless{it==0 && lastOutcome?.successful==true}
         field(info,"已签人数",count?.let{"$it 人"} ?: "暂未提供")
 
         val resultCard=StudyUi.card(this,body)
-        val result=lastOutcome
+        val locked=submissionLocked()
+        val result=lastOutcome ?: if(locked)null else resultCheck
+        val label=result?.category?.label ?: if(locked)SignResultCategory.UNKNOWN.label else if(ended)"尚未查询" else "尚未提交"
         resultCard.addView(StudyUi.text(this,"操作账号：$sessionLabel",13,true))
-        if(result==null)resultCard.addView(StudyUi.text(this,"签到结果",16,true))
-        else {
-            resultCard.addView(StudyUi.text(this,"签到结果 · ${result.category.label}",16,true,
-                if(result.successful)ModernUi.strongPrimary else ModernUi.ink))
+        resultCard.addView(StudyUi.text(this,"签到结果 · $label",16,true,
+            if(result?.successful==true)ModernUi.strongPrimary else ModernUi.ink))
+        if(result!=null) {
             if(result.photoState!=PhotoTransferState.NOT_SENT)resultCard.addView(StudyUi.text(this,result.photoState.label,13))
             resultCard.addView(StudyUi.text(this,result.message,13))
+        } else if(locked) {
+            resultCard.addView(StudyUi.text(this,"已有提交记录，请刷新结果，不要重复提交。",13))
         }
-        resultCheck?.takeUnless{it.successful}?.let{resultCard.addView(StudyUi.text(this,"结果查询：${it.message}",13))}
+        resultCheck?.takeIf{it!==result && !it.successful}?.let{
+            val note=if(result?.successful==true)"\n保留此前已确认的签到结果。" else ""
+            resultCard.addView(StudyUi.text(this,"结果查询：${it.message}$note",13))
+        }
         resultCard.addView(StudyUi.button(this,"刷新学习通签到结果"){checkAttendance(refreshOverview=true)}.apply{
             ModernUi.button(this,textOnly=true);isEnabled=!working
         })
-        if(ended) {
-            addActivityTools(includeDetection=false)
-            return
-        }
-        val terminal=result?.successful==true || result?.category in setOf(SignResultCategory.UNKNOWN,SignResultCategory.ALREADY_ATTEMPTED)
-        if(terminal) {
-            addActivityTools(includeDetection=true)
+        if(ended || locked) {
+            addActivityTools(includeDetection=!ended)
             return
         }
         val details=StudyUi.card(this,body)
@@ -131,6 +134,7 @@ class SignActionActivity:StudyActivity() {
                     details.addView(StudyUi.text(this,fix?.let{"本次位置：${it.latitude}, ${it.longitude}"} ?: "本次二维码还要求手机位置。",13))
                     details.addView(StudyUi.button(this,"更新本次手机定位"){locate()})
                 }
+                details.addView(StudyUi.text(this,"在 ClassBell 内在线提交，结果在本页显示。",13))
                 details.addView(StudyUi.button(this,"确认二维码并提交",true){confirm()}.apply{isEnabled=qr!=null && !working})
             }
             SignMode.GESTURE -> {
@@ -198,7 +202,12 @@ class SignActionActivity:StudyActivity() {
     private fun checkAttendance(refreshOverview:Boolean=historyOnly) {
         if(!valid() || working)return
         work("正在查询签到结果…",{
-            val result=source.attendance(sign)
+            val result=try{source.attendance(sign)} catch(e:Exception){
+                if(e is java.util.concurrent.CancellationException)throw e
+                DiagnosticLog.error("SignAttendance",e)
+                val message=if(e is ApiProblem || e is LoginRequired)e.message.orEmpty() else ""
+                SignOutcome(false,message.ifBlank{"暂时无法查询签到结果，请稍后刷新。"},SignResultCategory.UNKNOWN)
+            }
             val metadata=if(refreshOverview)try{source.overview(sign)} catch(e:Exception){
                 if(e is java.util.concurrent.CancellationException)throw e
                 DiagnosticLog.error("SignOverview",e)
@@ -258,7 +267,8 @@ class SignActionActivity:StudyActivity() {
         deviceLocation.request {value->if(!isDestroyed){fix=value;state.text=if(value==null)"未取得足够精确的新定位，请检查系统定位和权限后重试。" else "定位已更新，请核对后提交。";render()}}
     }
     private fun confirm(code:String="") {
-        if(!valid() || working || dialog?.isShowing==true)return
+        if(!valid() || working || ended || dialog?.isShowing==true)return
+        if(submissionLocked()){render();return}
         val mode=plan?.mode ?: return
         val selectedPhoto=photo
         if(mode==SignMode.PHOTO && (submittingPhoto || selectedPhoto?.isFile!=true))return
@@ -274,7 +284,8 @@ class SignActionActivity:StudyActivity() {
         dialog=ModernUi.dialog(this).setTitle(if(mode==SignMode.PHOTO)"确认上传并签到" else "提交本次签到")
             .setMessage("${sign.course.name}\n${sign.title}$position\n\n操作账号：$sessionLabel。${if(mode==SignMode.PHOTO)"将预览中的照片上传到学习通，用于本次普通拍照签到。\n\n" else ""}仅提交这项签到，结果未知时不会自动重试。")
             .setNegativeButton("取消",null).setPositiveButton("提交一次"){_,_->
-                if(!valid() || working || submittingPhoto)return@setPositiveButton
+                if(!valid() || working || submittingPhoto || ended)return@setPositiveButton
+                if(submissionLocked()){render();return@setPositiveButton}
                 val owner=sessionOwner
                 if(mode==SignMode.PHOTO){submittingPhoto=true;render()}
                 work("正在提交，请勿重复操作…",{
@@ -282,6 +293,7 @@ class SignActionActivity:StudyActivity() {
                         SignInputs(code=code,photo=selectedPhoto,fix=selectedFix,point=selectedPoint,expectedMode=mode,qr=selectedQr,gesture=selectedGesture),::guardCourse)
                 }){result->
                     lastOutcome=result
+                    resultCheck=null
                     state.text=result.message
                     if(mode==SignMode.QR && result.retryAllowed)qr=null
                     if(result.successful){qr=null;gesture=""}
@@ -327,3 +339,6 @@ class SignActionActivity:StudyActivity() {
             .putExtra("timeline",timeline)
     }
 }
+
+internal val SignOutcome.locksSignSubmission: Boolean
+    get()=successful || category==SignResultCategory.UNKNOWN || category==SignResultCategory.ALREADY_ATTEMPTED

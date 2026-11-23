@@ -2,11 +2,13 @@ package cn.classbell.app
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.View
 import android.widget.*
 import java.io.File
 import java.util.concurrent.Executors
@@ -27,7 +29,12 @@ class MultiAccountSignActivity:Activity() {
     private var accounts=emptyList<BoundAccount>()
     private val selected=linkedSetOf<String>()
     private val plans=linkedMapOf<String,SignPlan>()
-    private val results=linkedMapOf<String,String>()
+    private enum class Step { CHECK, QUERY, SUBMIT }
+    private data class StepResult(val plan:SignPlan?=null,val outcome:SignOutcome?=null,val message:String?=null)
+    private val submitResults=linkedMapOf<String,SignOutcome>()
+    private val queryResults=linkedMapOf<String,SignOutcome>()
+    private val confirmed=linkedMapOf<String,SignOutcome>()
+    private val notes=linkedMapOf<String,String>()
     private val photos=linkedMapOf<String,File>()
     private val previews=linkedMapOf<String,android.graphics.Bitmap>()
     private var code=""
@@ -74,7 +81,7 @@ class MultiAccountSignActivity:Activity() {
             checkButton.isEnabled=!busy && selected.isNotEmpty()
             resultButton.isEnabled=checkButton.isEnabled
             submitButton.isEnabled=checkButton.isEnabled && selected.all{it in plans} &&
-                selected.any{plans[it]?.mode != SignMode.OFFICIAL && !app.signing.ledger.attempted(it,item)}
+                selected.any{plans[it]?.mode != SignMode.OFFICIAL && !locked(it)}
         }
         updateActions()
         if(busy)intro.addView(StudyUi.button(this,"停止后续账号"){cancel();state.text="已停止后续处理。已发出的提交请查看记录并核对。";render()})
@@ -87,8 +94,23 @@ class MultiAccountSignActivity:Activity() {
                     updateActions()
                 }
             })
-            row.addView(StudyUi.text(this,results[account.id] ?: plans[account.id]?.message ?: "尚未核对",13))
-            val plan=plans[account.id]
+            val id=account.id
+            val submission=submitResults[id]
+            val query=queryResults[id]
+            val outcome=when {
+                confirmed[id]!=null->confirmed[id]
+                submission!=null->submission
+                locked(id)->null
+                else->query
+            }
+            val plan=plans[id]
+            val headline=outcome?.let{"${it.category.label} · ${it.message}"}
+                ?: if(locked(id)) "结果待核实 · 已有提交记录，请刷新结果。" else plan?.message ?: "尚未核对"
+            row.addView(StudyUi.text(this,headline,13,true,if(outcome?.successful==true)ModernUi.strongPrimary else ModernUi.ink))
+            val photoState=submission?.photoState ?: PhotoTransferState.NOT_SENT
+            if(photoState!=PhotoTransferState.NOT_SENT)row.addView(StudyUi.text(this,photoState.label,12))
+            if(query!=null && query!==outcome && !query.successful)row.addView(StudyUi.text(this,"最近查询：${query.message}",12))
+            notes[id]?.let{row.addView(StudyUi.text(this,it,12))}
             plan?.requirements?.lines?.takeIf{it.isNotEmpty()}?.let{row.addView(StudyUi.text(this,it.joinToString("\n"),12))}
             if(plan?.repairNeeded==true)row.addView(StudyUi.text(this,if(plan.issueCode=="LOCATION_DISABLED")"不可用" else "待修复",12,true).apply{setTextColor(ModernUi.danger)})
             if(plan?.mode==SignMode.PHOTO) {
@@ -134,54 +156,82 @@ class MultiAccountSignActivity:Activity() {
         controls.addView(submitButton)
     }
     private fun chosen()=accounts.filter{it.id in selected}
+    private fun locked(id:String)=id in confirmed || submitResults[id]?.locksSignSubmission==true || app.signing.ledger.attempted(id,item)
+    private fun skipReason(account:BoundAccount):String? = when {
+        !accountStore.current(account)->"账号已更新或解绑"
+        account.id in confirmed->"已确认签到"
+        locked(account.id)->"已有提交记录，请先刷新结果"
+        plans[account.id]?.mode==SignMode.OFFICIAL->"当前签到要求不支持应用内处理"
+        else->null
+    }
     private fun guard(account:BoundAccount,token:Int) {
         if(closed || token!=generation || Thread.currentThread().isInterrupted)throw java.util.concurrent.CancellationException()
         if(!accountStore.current(account))throw ApiProblem("账号已更新或解绑，请返回重新进入。")
     }
     private fun check() {
         val chosen=chosen();if(chosen.isEmpty()){state.text="请先选择账号。";return}
-        chosen.forEach{plans.remove(it.id);results.remove(it.id)}
-        runAccounts(chosen,"正在逐个核对要求…") {account,api,_->
-            val plan=api.plan(item)
-            plan to plan.message
+        chosen.forEach{plans.remove(it.id);notes.remove(it.id)}
+        runAccounts(chosen,"正在逐个核对要求…",Step.CHECK) {_,api,_->
+            StepResult(plan=api.plan(item))
         }
     }
     private fun refreshResults() {
         val chosen=chosen()
         if(chosen.isEmpty())return
-        runAccounts(chosen,"正在逐个查询签到结果…") { account,api,guard ->
+        runAccounts(chosen,"正在逐个查询签到结果…",Step.QUERY) { account,api,guard ->
             val outcome=api.attendance(item)
             guard()
             if(outcome.successful) {
                 app.signing.ledger.reserve(account.id,item)
                 app.signing.ledger.record(account.id,item,"结果查询 · ${outcome.message}")
             }
-            null to "${outcome.category.label} · ${outcome.message}"
+            StepResult(outcome=outcome)
         }
     }
     private fun confirm() {
-        val chosen=chosen();if(chosen.isEmpty())return
+        val chosen=chosen();if(chosen.isEmpty() || busy || dialog?.isShowing==true)return
         if(chosen.any{plans[it.id]==null}){state.text="请先核对全部所选账号的要求。";return}
-        val ready=chosen.filter{plans[it.id]?.mode!=SignMode.OFFICIAL && !app.signing.ledger.attempted(it.id,item)}
-        if(ready.isEmpty()){state.text="所选账号没有可提交的签到，请查看各账号状态。";return}
+        val choices=chosen.associateWith(::skipReason)
+        val ready=chosen.filter{choices[it]==null}
+        if(ready.isEmpty()){state.text="所选账号没有可提交的签到：${choices.values.filterNotNull().distinct().joinToString("；")}。";return}
         if(ready.any{plans[it.id]?.mode==SignMode.PHOTO && photos[it.id]?.isFile!=true}){state.text="请分别选择需要照片的账号的本次照片。";return}
         if(ready.any{plans[it.id]?.mode==SignMode.CODE} && !Regex("[0-9]{4,16}").matches(code)){state.text="请填写老师公布的签到码。";return}
         if(ready.any{plans[it.id]?.mode==SignMode.QR} && qr?.activityId!=item.id){state.text="请先扫描本次签到的当前二维码。";return}
         if(ready.any{plans[it.id]?.mode==SignMode.GESTURE} && !GesturePath.valid(gesture)){state.text="请按老师公布的顺序输入手势。";return}
         if(ready.any{plans[it.id]?.mode==SignMode.LOCATION || plans[it.id]?.requiresLocation==true} && diagnosticRunCatching{fix?.requireCurrent() ?: throw ApiProblem("未定位")}.isFailure){state.text="请先更新本次手机定位。";return}
         val selectedQr=qr;val selectedGesture=gesture;val selectedCode=code;val selectedFix=fix;val selectedPhotos=photos.toMap();val selectedModes=plans.mapValues{it.value.mode}
-        dialog=ModernUi.dialog(this).setTitle("提交 ${ready.size} 个账号")
-            .setMessage("${item.course.name}\n${item.title}\n\n${ready.joinToString("\n"){it.label}}\n\n本次跳过 ${chosen.size-ready.size} 个账号。所需照片仅用于对应账号，结果分别记录。")
+        dialog=ModernUi.dialog(this).setTitle("确认本次签到")
+            .setView(confirmationPanel(choices))
             .setNegativeButton("取消",null).setPositiveButton("提交所选账号一次"){_,_->
-                runAccounts(ready,"正在提交所选账号…",parallel=ready.all{selectedModes[it.id]==SignMode.QR}) {account,api,check->
+                choices.forEach{(account,reason)->if(reason!=null)notes[account.id]=reason}
+                runAccounts(ready,"正在提交所选账号…",Step.SUBMIT,parallel=ready.all{selectedModes[it.id]==SignMode.QR}) {account,api,check->
                     val outcome=SignSubmission(app.signing.ledger).submit(account.id,item,api,
                         SignInputs(code=selectedCode,photo=selectedPhotos[account.id],fix=selectedFix,expectedMode=selectedModes[account.id],qr=selectedQr,gesture=selectedGesture),check)
-                    null to "${outcome.category.label} · ${outcome.message}" +
-                        if(outcome.photoState!=PhotoTransferState.NOT_SENT)"\n${outcome.photoState.label}" else ""
+                    StepResult(outcome=outcome)
                 }
             }.create().apply{setOnDismissListener{dialog=null};show()}
     }
-    private fun runAccounts(chosen:List<BoundAccount>,message:String,parallel:Boolean=false,action:(BoundAccount,SignSource,()->Unit)->Pair<SignPlan?,String>) {
+    private fun confirmationPanel(choices:Map<BoundAccount,String?>):ScrollView {
+        val activity=this
+        val content=StudyUi.column(activity).apply{setPadding(ModernUi.dp(activity,20),0,ModernUi.dp(activity,20),ModernUi.dp(activity,8))}
+        val heading=StudyUi.card(activity,content).apply{background=ModernUi.shape(activity,ModernUi.soft,16)}
+        heading.addView(StudyUi.text(activity,item.course.name,17,true))
+        heading.addView(StudyUi.text(activity,item.title.ifBlank{"课程签到"},13))
+        fun section(title:String,rows:Map<BoundAccount,String?>,tone:Int) {
+            if(rows.isEmpty())return
+            content.addView(StudyUi.text(activity,"$title · ${rows.size}",13,true,tone))
+            for((account,reason) in rows) {
+                val row=StudyUi.card(activity,content).apply{background=ModernUi.shape(activity,ModernUi.background,14)}
+                row.addView(StudyUi.text(activity,account.label,15,true))
+                row.addView(StudyUi.text(activity,reason ?: "仅提交一次",12))
+            }
+        }
+        section("将提交",choices.filterValues{it==null},ModernUi.strongPrimary)
+        section("将跳过",choices.filterValues{it!=null},ModernUi.muted)
+        content.addView(StudyUi.text(activity,"结果按账号分别显示。结果未知时不会自动重试。",12))
+        return ScrollView(activity).apply{addView(content)}
+    }
+    private fun runAccounts(chosen:List<BoundAccount>,message:String,step:Step,parallel:Boolean=false,action:(BoundAccount,SignSource,()->Unit)->StepResult) {
         if(busy)return
         val token=++generation;busy=true;state.text=message;render()
         task=worker.submit {
@@ -197,8 +247,22 @@ class MultiAccountSignActivity:Activity() {
                         DiagnosticLog.operation("BatchSignAccount","account=${DiagnosticLog.reference(account.id)} ${DiagnosticLog.activity(item)} step=${index+1}/${chosen.size} parallel=$parallel"){action(account,api){guard(account,token)}}
                     } finally {activeSources.remove(api);api.cancel()}
                 } catch(e:java.util.concurrent.CancellationException){return}
-                catch(e:Exception){DiagnosticLog.error("BatchSignAccount",e);null to if(e is ApiProblem || e is LoginRequired)e.message.orEmpty() else "此账号的操作未能确认，请刷新结果。"}
-                main.post{if(!closed && token==generation){val count=completed.incrementAndGet();result.first?.let{plans[account.id]=it};results[account.id]=result.second;state.text="已处理 $count / ${chosen.size}";render()}}
+                catch(e:Exception){DiagnosticLog.error("BatchSignAccount",e);StepResult(message=if(e is ApiProblem || e is LoginRequired)e.message.orEmpty() else "此账号的操作未能确认，请刷新结果。")}
+                main.post {
+                    if(!closed && token==generation) {
+                        val count=completed.incrementAndGet()
+                        val id=account.id
+                        result.plan?.let{plans[id]=it}
+                        result.outcome?.let{outcome->
+                            if(step==Step.SUBMIT){submitResults[id]=outcome;queryResults.remove(id)}
+                            if(step==Step.QUERY)queryResults[id]=outcome
+                            if(outcome.successful)confirmed[id]=outcome
+                        }
+                        if(result.message!=null)notes[id]=result.message else notes.remove(id)
+                        state.text="已处理 $count / ${chosen.size}"
+                        render()
+                    }
+                }
             }
             var pool:java.util.concurrent.ExecutorService?=null
             val pending=mutableListOf<Future<*>>()

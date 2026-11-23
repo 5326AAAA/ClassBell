@@ -231,9 +231,10 @@ class MainActivity : Activity() {
         locationPractice.addView(button("打开位置签到模拟"){startActivity(Intent(this,LocationDemoActivity::class.java))})
         locationPractice.addView(button("手动选点 / 经纬度预览"){if(app.prefs.getBoolean("loggedIn",false))startActivity(Intent(this,LocationPickerActivity::class.java)) else toast("请先登录账号。")})
         val qrPractice=card(testBody)
-        qrPractice.addView(label("二维码识别",19,ink,true))
-        qrPractice.addView(label("登录后可测试摄像头与相册识别。识别本身不执行签到。",13,muted))
-        qrPractice.addView(button("打开扫码识别"){if(app.prefs.getBoolean("loggedIn",false))startActivity(Intent(this,QrScanActivity::class.java)) else toast("请先在账号中心登录。")})
+        qrPractice.addView(label("二维码签到与识别",19,ink,true))
+        qrPractice.addView(label("正式签到在 ClassBell 内核对课程、在线提交并显示结果。网页入口仅测试识别。",13,muted))
+        qrPractice.addView(button("打开应用内扫码签到"){if(app.prefs.getBoolean("loggedIn",false))startActivity(Intent(this,QrScanActivity::class.java)) else toast("请先在账号中心登录。")})
+        qrPractice.addView(button("网页扫码测试（不提交）"){if(app.prefs.getBoolean("loggedIn",false))startActivity(Intent(this,LocalScanWebActivity::class.java)) else toast("请先在账号中心登录。")})
         qrPractice.addView(button("预览无签名签到链接") {
             val preview = Uri.Builder().scheme("https").authority("example.invalid")
                 .appendPath("attendance").appendPath("preview")

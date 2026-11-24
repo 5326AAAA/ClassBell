@@ -8,9 +8,7 @@ research/
 *.keystore
 .idea/
 *.iml
-outputs/
-.codex-attachments/
-*.apk
-*.idsig
-.env
-.env.*
+scripts/registry-before.json
+scripts/device-parameters-before.reg
+scripts/repair-result.json
+scripts/device-restart.txt

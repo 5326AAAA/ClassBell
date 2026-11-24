@@ -66,9 +66,9 @@ android {
         applicationId = "cn.classbell.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 43
-        versionName = "1.2.0"
-        testInstrumentationRunner = "android.test.InstrumentationTestRunner"
+        versionCode = 47
+        versionName = "1.3.3"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -115,4 +115,8 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
     testImplementation("org.robolectric:robolectric:4.14.1")
+    androidTestImplementation("androidx.test:runner:1.7.0")
+    androidTestImplementation("androidx.test.ext:junit:1.3.0")
+    androidTestImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
+    androidTestImplementation("com.squareup.okhttp3:okhttp-tls:4.12.0")
 }

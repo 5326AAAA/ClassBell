@@ -12,7 +12,7 @@ import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 enum class SignMode { NORMAL, PHOTO, CODE, LOCATION, QR, GESTURE, OFFICIAL }
-data class SignPlan(val mode: SignMode, val message: String, val issueCode:String="", val repairNeeded:Boolean=mode==SignMode.OFFICIAL,val requiresLocation:Boolean=false,val requirements:SignRequirements=SignRequirements(),val overview:SignOverview?=null) {
+data class SignPlan(val mode: SignMode, val message: String, val issueCode:String="", val repairNeeded:Boolean=mode==SignMode.OFFICIAL,val requiresLocation:Boolean=false,val requirements:SignRequirements=SignRequirements(),val overview:SignOverview?=null,val qrRefresh:QrRefreshInfo=QrRefreshInfo()) {
     init { DiagnosticLog.event("SignPlan", "mode=$mode issue=$issueCode repair=$repairNeeded reason=${DiagnosticLog.label(message)}") }
 }
 enum class SignResultCategory(val label:String) { SUCCESS("成功"), NOT_SUBMITTED("尚未提交"), FAILED("未成功"), UNKNOWN("结果待核实"), SERVER_LIMIT("服务端限制"), VERIFICATION("需要验证"), NEEDS_FIX("待修复"), ALREADY_ATTEMPTED("已有提交记录") }
@@ -95,7 +95,7 @@ object SignProtocol {
         }
         return when {
             photo=="1"->SignPlan(SignMode.PHOTO,"已识别拍照签到：选择照片、核对后在本应用提交。")
-            type=="2"->SignPlan(SignMode.QR,"已识别扫码签到：扫描当前二维码，核对账号后在本应用提交。",requiresLocation=flag("ifopenAddress")=="1")
+            type=="2"->SignPlan(SignMode.QR,"已识别扫码签到：扫描当前二维码，核对账号后在本应用提交。",requiresLocation=flag("ifopenAddress")=="1",requirements=requirements,overview=overview,qrRefresh=QrRefreshInfo.read(data))
             type=="3"->SignPlan(SignMode.GESTURE,"已识别手势签到：按老师公布的顺序连接九宫格，在本应用提交。")
             type=="5"->SignPlan(SignMode.CODE,"已识别签到码：输入老师公布的签到码，在本应用提交。")
             type=="4"->SignPlan(SignMode.LOCATION,"已识别位置签到：核对本次位置，在本应用提交。")
@@ -123,6 +123,11 @@ object SignProtocol {
         traceResponse(value,"submit")
         if(value in setOf("success","success2"))return SignOutcome(true,if(value=="success2")"签到成功（迟到）" else "签到成功")
         if(value in setOf("您已签到过了","你已经签到过了","您已签到","已签到"))return SignOutcome(true,"学习通返回已签到")
+        val structured=if(value.startsWith("{"))runCatching{JSONObject(value)}.getOrNull() else null
+        val message=if(structured!=null && (structured.optString("status")=="false" || structured.optString("result") in setOf("false","0")))
+            listOf("mes","msg","errorMsg").map{structured.optString(it)}.firstOrNull{it.isNotBlank()}.orEmpty() else value
+        if(message.length<=256 && !message.contains('<') && Regex("^二维码[^<>]*(?:过期|失效|无效|已更新|已刷新)[^<>]*$").matches(message))
+            return SignOutcome(false,"二维码已过期或已更新，请重新扫描当前码。",SignResultCategory.FAILED,retryAllowed=true)
         return when {
             value in setOf("二维码已过期","二维码已失效","二维码已更新","二维码无效","签到码错误","签到码不正确","手势不正确","手势错误") ->
                 SignOutcome(false,if(value.startsWith("二维码"))"二维码未被接受，请重新扫描当前码后再提交。" else "签到码或手势未被接受，请修改后再提交。",retryAllowed=true)

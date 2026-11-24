@@ -1,6 +1,7 @@
 package cn.classbell.app
 
 import org.json.JSONObject
+import java.math.BigDecimal
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -37,9 +38,33 @@ data class SignOverview(
                 5 -> "签到码"
                 else -> "签到"
             }
-            val count = field("attendNum")?.toIntOrNull()?.takeIf{it>=0}
+            val count = attendedCount(data)
             return SignOverview(data.optString("name").trim().take(160).ifBlank{item.title},type,
                 data.optInt("status"),time("startTime","starttime"),time("createtime"),time("endTime","endtime"),count)
+        }
+
+        /** Only the explicit attended-person field is supported by the observed student payloads.
+         * A total, percentage, activity-list size, or missing value must never become a signed count.
+         */
+        internal fun attendedCount(data:JSONObject):Int? {
+            val values=data.keys().asSequence().filter{it.equals("attendNum",ignoreCase=true)}
+                .mapNotNull { key->
+                    if(data.isNull(key))null else data.opt(key)?.let { value->
+                        if(value is String && value.isBlank())null else value
+                    }
+                }.toList()
+            if(values.isEmpty())return null
+            val counts=values.map { value->
+                if(value !is Number && value !is String)return null
+                val encoded=value.toString().trim()
+                if(encoded.length !in 1..40)return null
+                val count=try { BigDecimal(encoded).intValueExact() }
+                    catch(_:NumberFormatException){return null}
+                    catch(_:ArithmeticException){return null}
+                if(count<0)return null
+                count
+            }
+            return counts.distinct().singleOrNull()
         }
     }
 }

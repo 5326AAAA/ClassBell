@@ -23,6 +23,11 @@ interface SignSource {
     fun submitManualLocation(activity:SignActivity,point:ManualLocation,beforeCommit:()->Unit={}):SignOutcome = throw ApiProblem("手动位置提交暂不可用，请在学习通完成。")
     fun submitQr(activity:SignActivity,qr:SignQr,fix:LocationFix?=null,beforeCommit:()->Unit={}):SignOutcome = throw ApiProblem("扫码提交暂不可用，待修复。")
     fun submitGesture(activity:SignActivity,path:String,beforeCommit:()->Unit={}):SignOutcome = throw ApiProblem("手势提交暂不可用，待修复。")
+    fun prepareQr(activity:SignActivity):PreparedQr {
+        val checked=plan(activity)
+        if(checked.mode!=SignMode.QR)throw ApiProblem(checked.message)
+        return PreparedQr(this,activity,checked){qr,fix,before->submitQr(activity,qr,fix,before)}
+    }
     fun cancel()
 }
 
@@ -42,17 +47,19 @@ class SigningApi(private val snapshot: List<Cookie>, private val guard: () -> Un
         cancelled=true
         closeNetworkAsync { client.dispatcher.cancelAll();client.connectionPool.evictAll();client.dispatcher.executorService.shutdown() }
     }
-    private fun get(path: String, values: Map<String, String> = emptyMap()): String {
+    private fun get(path: String, values: Map<String, String> = emptyMap(),timeoutMillis:Long?=null): String {
         val url = path.toHttpUrl().newBuilder().apply { values.forEach { (k,v) -> addQueryParameter(k,v) } }.build()
-        return request(Request.Builder().url(url).get())
+        return request(Request.Builder().url(url).get(),timeoutMillis)
     }
-    private fun request(builder: Request.Builder): String {
+    private fun request(builder: Request.Builder,timeoutMillis:Long?=null): String {
         if(cancelled) throw ApiProblem("签到操作已取消。")
         guard()
         val request = builder.header("User-Agent", "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 Chrome/131.0.0.0 Mobile Safari/537.36").build()
         if (!ChaoxingProtocol.allowed(request.url)) throw IOException("不支持的签到请求地址")
         exchange?.let { return it(request) }
-        client.newCall(request).execute().use { response ->
+        val call=client.newCall(request)
+        timeoutMillis?.let{call.timeout().timeout(it,TimeUnit.MILLISECONDS)}
+        call.execute().use { response ->
             if (response.code == 401 || response.code in 300..399) throw LoginRequired()
             if (!response.isSuccessful) throw ApiProblem("学习通请求未完成（HTTP ${response.code}）；未自动重试。")
             val body = response.body ?: throw ApiProblem("学习通返回空响应，需到官方核对。")
@@ -84,7 +91,7 @@ class SigningApi(private val snapshot: List<Cookie>, private val guard: () -> Un
         if(activity.kind!=ReminderKind.SIGN_IN || !SignProtocol.validId(activity.id) || !SignProtocol.validId(uid))
             throw ApiProblem("签到或账号身份无效，无法查询结果。")
         return DiagnosticLog.operation("SignAttendance",DiagnosticLog.activity(activity)) {
-            val body=get("https://mobilelearn.chaoxing.com/v2/apis/sign/getAttendInfo",mapOf("activeId" to activity.id,"moreClassAttendEnc" to ""))
+            val body=get("https://mobilelearn.chaoxing.com/v2/apis/sign/getAttendInfo",mapOf("activeId" to activity.id,"moreClassAttendEnc" to ""),timeoutMillis=2_500)
             SignProtocol.attendance(body,activity,uid)
         }
     }
@@ -101,6 +108,57 @@ class SigningApi(private val snapshot: List<Cookie>, private val guard: () -> Un
     override fun submitGesture(activity:SignActivity,path:String,beforeCommit:()->Unit):SignOutcome {
         GesturePath.requireValid(path)
         return submitMaterial(activity,SignMode.GESTURE,code=path,beforeCommit=beforeCommit)
+    }
+    override fun prepareQr(activity:SignActivity):PreparedQr {
+        guard()
+        if(activities(activity.course).none{it.id==activity.id && it.kind==ReminderKind.SIGN_IN})throw ApiProblem("签到已不在进行中，请刷新活动。")
+        val checked=plan(activity)
+        if(checked.mode!=SignMode.QR)throw ApiProblem(checked.message)
+        val user=ApiParser.json(get("https://sso.chaoxing.com/apis/login/userLogin4Uname.do")).optJSONObject("msg") ?: throw LoginRequired()
+        if(!SignProtocol.validId(uid) || uid !in setOf(user.optString("uid"),user.optString("puid")) || user.optString("name").isBlank())throw LoginRequired()
+        AccountAccess.check(user.optString("name"))
+        val fid=snapshot.firstOrNull{it.name=="fid"}?.value.orEmpty().ifBlank{user.optString("fid")}
+        if(!SignProtocol.validId(fid))throw ApiProblem("请重新登录此账号以取得学校编号。")
+        val page=get("https://mobilelearn.chaoxing.com/newsign/preSign",mapOf("activePrimaryId" to activity.id,"courseId" to activity.course.id,
+            "classId" to activity.course.classId,"uid" to uid,"general" to "1","sys" to "1","ls" to "1","appType" to "15","ut" to "s"))
+        if(page.contains("用户登录") || page.contains("passport2.chaoxing.com/login"))throw LoginRequired()
+        if(listOf("请先完成验证","请完成安全验证","请进行人脸识别").any(page::contains))throw ApiProblem("此活动需要完成官方验证。")
+        // This request also warms the exact server connection used by the final submission.
+        val finalPlan=plan(activity)
+        if(finalPlan.mode!=SignMode.QR || finalPlan.requiresLocation!=checked.requiresLocation)throw ApiProblem("签到要求已变化，请重新准备。")
+        DiagnosticLog.event("QrTiming","prepared=true refresh_seconds=${finalPlan.qrRefresh.seconds ?: -1}")
+        return PreparedQr(this,activity,finalPlan){qr,fix,before->
+            guard();qr.requireFor(activity);qr.requireFresh()
+            val fields=linkedMapOf("activeId" to activity.id,"uid" to uid,"name" to user.optString("name"),"fid" to fid,
+                "clientip" to "","useragent" to "","latitude" to "-1","longitude" to "-1","appType" to "15","ifTiJiao" to "1","enc" to qr.enc)
+            if(finalPlan.requiresLocation) {
+                val current=fix ?: throw ApiProblem("请先更新本次手机定位。")
+                current.requireCurrent()
+                fields["location"]=JSONObject().put("result",1).put("latitude",current.latitude).put("longitude",current.longitude)
+                    .put("address","当前位置（${current.latitude}, ${current.longitude}）").toString()
+            }
+            if(finalPlan.qrRefresh.enabled==true && qr.code!=null) {
+                qr.requireFresh()
+                val rcode="SIGNIN:aid=${activity.id}&source=15&Code=${qr.code}&enc=${qr.enc}"
+                val boundPage="https://mobilelearn.chaoxing.com/newsign/preSign".toHttpUrl().newBuilder()
+                    .addQueryParameter("activePrimaryId",activity.id).addQueryParameter("courseId",activity.course.id)
+                    .addQueryParameter("classId",activity.course.classId).addQueryParameter("uid",uid)
+                    .addQueryParameter("general","1").addQueryParameter("sys","1").addQueryParameter("ls","1")
+                    .addQueryParameter("appType","15").addQueryParameter("ut","s").addQueryParameter("rcode",rcode).build()
+                val remaining=(4_500-(android.os.SystemClock.elapsedRealtime()-qr.capturedAt)).coerceIn(1,4_500)
+                val checkedPage=request(Request.Builder().url(boundPage).get(),remaining)
+                if(checkedPage.contains("用户登录") || checkedPage.contains("passport2.chaoxing.com/login"))throw LoginRequired()
+                if(listOf("请先完成验证","请完成安全验证","请进行人脸识别").any(checkedPage::contains))throw ApiProblem("当前二维码需要完成官方验证。")
+            }
+            before();guard();qr.requireFresh()
+            val url="https://mobilelearn.chaoxing.com/pptSign/stuSignajax".toHttpUrl().newBuilder()
+                .apply{fields.forEach{(k,v)->addQueryParameter(k,v)}}.build()
+            val budget=(4_500-(android.os.SystemClock.elapsedRealtime()-qr.capturedAt)).coerceIn(1,4_500)
+            DiagnosticLog.event("QrTiming","dispatch_ms=${android.os.SystemClock.elapsedRealtime()-qr.capturedAt} budget_ms=$budget")
+            val outcome=SignProtocol.outcome(request(Request.Builder().url(url).tag(QrDispatchTrace::class.java,QrDispatchTrace(qr.capturedAt)).get(),budget))
+            DiagnosticLog.event("QrTiming","result_ms=${android.os.SystemClock.elapsedRealtime()-qr.capturedAt} confirmed=${outcome.successful} category=${outcome.category}")
+            outcome
+        }
     }
     override fun submitQr(activity:SignActivity,qr:SignQr,fix:LocationFix?,beforeCommit:()->Unit):SignOutcome {
         qr.requireFor(activity)

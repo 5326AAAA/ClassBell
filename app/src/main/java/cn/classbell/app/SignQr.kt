@@ -34,23 +34,34 @@ import kotlin.math.floor
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 /** Only decoded material, never a session. Binding to the authenticated course is checked again at commit. */
-class SignQr private constructor(val officialUrl:String,val activityId:String,internal val enc:String) {
+class SignQr private constructor(val officialUrl:String,val activityId:String,internal val enc:String,internal val code:String?=null) {
+    internal var capturedAt=android.os.SystemClock.elapsedRealtime()
+    internal fun requireFresh() {
+        val elapsed=android.os.SystemClock.elapsedRealtime()-capturedAt
+        if(elapsed !in 0..4_500)throw ApiProblem("本次扫码已超过提交时限，请重新扫描当前二维码。")
+    }
     override fun toString()="SignQr(redacted)"
     fun requireFor(activity:SignActivity) { if(activityId!=activity.id)throw ApiProblem("二维码不属于当前签到，请重新扫描对应课程的二维码。") }
     companion object {
+        internal fun fromResult(data:android.content.Intent?):SignQr? = data?.getStringExtra(QrScanActivity.MATERIAL)?.let(::parse)?.also {
+            it.capturedAt=data.getLongExtra(QrScanActivity.CAPTURED_AT,it.capturedAt)
+        }
         fun parse(raw:String):SignQr? {
             if(raw.length !in 1..4096 || raw.any{it.isWhitespace() || it.code<32})return null
             val normalized=if(raw.startsWith("SIGNIN:"))"https://mobilelearn.chaoxing.com/widget/sign/e?"+raw.removePrefix("SIGNIN:").removePrefix("?") else raw
             val url=normalized.toHttpUrlOrNull() ?: return null
             if(url.scheme!="https" || url.host!="mobilelearn.chaoxing.com" || url.port!=443 || url.username.isNotEmpty() || url.password.isNotEmpty() || url.fragment!=null || url.encodedPath!="/widget/sign/e")return null
-            val allowed=setOf("id","aid","c","enc","DB_STRATEGY","STRATEGY_PARA")
+            val allowed=setOf("id","aid","c","Code","source","enc","DB_STRATEGY","STRATEGY_PARA")
             if(url.queryParameterNames.any{it !in allowed || url.queryParameterValues(it).size!=1})return null
             val id=url.queryParameter("id") ?: url.queryParameter("aid") ?: return null
             if(url.queryParameter("id")!=null && url.queryParameter("aid")!=null)return null
+            if(url.queryParameter("c")!=null && url.queryParameter("Code")!=null)return null
+            if(url.queryParameter("source")?.let{it!="15"}==true)return null
+            val code=url.queryParameter("c") ?: url.queryParameter("Code")
             val enc=url.queryParameter("enc").orEmpty()
-            if(!Regex("[0-9]{1,30}").matches(id) || url.queryParameter("c")?.let{!Regex("[0-9]{1,30}").matches(it)}==true || !Regex("[a-fA-F0-9]{8,256}").matches(enc))return null
+            if(!Regex("[0-9]{1,30}").matches(id) || code?.let{!Regex("[0-9]{1,30}").matches(it)}==true || !Regex("[a-fA-F0-9]{8,256}").matches(enc))return null
             if(url.queryParameter("DB_STRATEGY")?.let{it!="PRIMARY_KEY"}==true || url.queryParameter("STRATEGY_PARA")?.let{it!="id"}==true)return null
-            return SignQr(url.toString(),id,enc)
+            return SignQr(url.toString(),id,enc,code)
         }
     }
 }

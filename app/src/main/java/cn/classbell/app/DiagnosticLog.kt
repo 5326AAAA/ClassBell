@@ -117,6 +117,7 @@ object DiagnosticLog {
     internal fun sanitize(value: String): String = value
         .replace(Regex("https?://[^\\s<>\"']+")) { endpoint(it.value) }
         .replace(Regex("(?i)(authorization|proxy-authorization|cookie|set-cookie)[\"']?\\s*[:=]\\s*[^\\r\\n]*"), "$1=[redacted]")
+        .replace(Regex("(?<![A-Za-z0-9_])(Code|c|(?i:rcode))[\"']?\\s*[:=]\\s*(?:\"[^\"]*\"|'[^']*'|[^\\s,;]+)"), "$1=[redacted]")
         .replace(Regex("(?i)(password|passwd|token|secret|_uid|puid|openid|unionid|wxsn|_wtime|phone|signCode|enc|gesture|latitude|longitude|手机号|密码)[\"']?\\s*[:=]\\s*(?:\"[^\"]*\"|'[^']*'|[^\\s,;]+)"), "$1=[redacted]")
         .replace(Regex("(?<![A-Za-z0-9])[0-9]{7,}(?![A-Za-z0-9])"), "[number]")
         .replace('\n', ' ').replace('\r', ' ').replace('\t', ' ').take(6000)
@@ -189,6 +190,12 @@ object DiagnosticLog {
             override fun secureConnectEnd(call: Call, handshake: Handshake?) = record("tls_end version=${handshake?.tlsVersion}")
             override fun connectionAcquired(call: Call, connection: Connection) = record("connection_acquired protocol=${connection.protocol()} fresh_attempts=$connections")
             override fun requestHeadersStart(call: Call) {phase="request_headers";record("request_headers_start")}
+            override fun requestHeadersEnd(call:Call,request:Request) {
+                request.tag(QrDispatchTrace::class.java)?.let { trace->
+                    val elapsed=android.os.SystemClock.elapsedRealtime()-trace.capturedAt
+                    event("QrTiming","headers_sent_ms=$elapsed within_5s=${elapsed in 0..5_000}")
+                }
+            }
             override fun requestBodyEnd(call: Call, byteCount: Long) = record("request_body_end bytes=$byteCount")
             override fun responseHeadersStart(call: Call) {phase="response_headers";record("response_headers_start")}
             override fun connectFailed(call: Call, address: InetSocketAddress, proxy: Proxy, protocol: Protocol?, ioe: IOException) { record("connect_failed"); error("$area/request=$requestId", ioe) }

@@ -19,6 +19,9 @@ class MultiAccountSignActivity:Activity() {
     private val app get()=application as BellApp
     internal var accountRepository:BoundAccounts?=null
     internal var sourceFactory:((BoundAccount,()->Unit)->SignSource)?=null
+    // Tests can exercise the real page without writing real account submission records.
+    internal var ledgerRepository:SignLedger?=null
+    private val ledger get()=ledgerRepository ?: app.signing.ledger
     private val accountStore get()=accountRepository ?: app.boundAccounts
     private val main=Handler(Looper.getMainLooper())
     private val worker=Executors.newSingleThreadExecutor()
@@ -40,6 +43,13 @@ class MultiAccountSignActivity:Activity() {
     private var code=""
     private var gesture=""
     private var qr:SignQr?=null
+    private val preparedSources=java.util.concurrent.ConcurrentHashMap<String,SignSource>()
+    private val preparedTickets=java.util.concurrent.ConcurrentHashMap<String,PreparedQr>()
+    private var scanningAccounts=emptyList<String>()
+    private var autoQrLoop=false
+    private var foreground=false
+    private var rejectedQrEnc:String?=null
+    private var lastQrEnc:String?=null
     private var fix:LocationFix?=null
     private var picking:String?=null
     @Volatile private var generation=0
@@ -143,10 +153,10 @@ class MultiAccountSignActivity:Activity() {
         })
         if(plans.values.any{it.mode==SignMode.GESTURE})controls.addView(gestureInput(this,gesture,!busy){gesture=it})
         if(plans.values.any{it.mode==SignMode.QR}) {
-            controls.addView(StudyUi.text(this,if(qr==null)"先核对账号、准备位置，再扫描老师当前的二维码。" else "已识别本次二维码，各账号使用自己的会话提交。码过期时请重扫；成功账号不会重复提交。",13))
-            controls.addView(StudyUi.button(this,if(qr==null)"扫描 / 相册识别本次二维码" else "更新本次二维码",true){
+            controls.addView(StudyUi.text(this,if(qr==null)"先选择账号并准备位置；识别当前码后，所选账号同时提交，无需再次确认。" else "已识别本次二维码，各账号使用自己的会话提交。码过期时请重扫；成功账号不会重复提交。",13))
+            controls.addView(StudyUi.button(this,"扫码并立即提交所选账号",true){
                 val bound=chosen().firstOrNull() ?: return@button
-                if(!busy){@Suppress("DEPRECATION") startActivityForResult(QrScanActivity.materialIntent(this,item.id,bound.id),QR)}
+                if(!busy)prepareAndScan()
             }.apply{isEnabled=!busy})
         }
         if(plans.values.any{it.mode==SignMode.LOCATION || it.requiresLocation}) {
@@ -156,7 +166,7 @@ class MultiAccountSignActivity:Activity() {
         controls.addView(submitButton)
     }
     private fun chosen()=accounts.filter{it.id in selected}
-    private fun locked(id:String)=id in confirmed || submitResults[id]?.locksSignSubmission==true || app.signing.ledger.attempted(id,item)
+    private fun locked(id:String)=id in confirmed || submitResults[id]?.locksSignSubmission==true || ledger.attempted(id,item)
     private fun skipReason(account:BoundAccount):String? = when {
         !accountStore.current(account)->"账号已更新或解绑"
         account.id in confirmed->"已确认签到"
@@ -175,15 +185,15 @@ class MultiAccountSignActivity:Activity() {
             StepResult(plan=api.plan(item))
         }
     }
-    private fun refreshResults() {
-        val chosen=chosen()
+    private fun refreshResults(automatic:Boolean=false) {
+        val chosen=chosen().filter{!automatic || (it.id !in confirmed && submitResults[it.id]?.category==SignResultCategory.UNKNOWN)}
         if(chosen.isEmpty())return
-        runAccounts(chosen,"正在逐个查询签到结果…",Step.QUERY) { account,api,guard ->
+        runAccounts(chosen,"正在逐个查询签到结果…",Step.QUERY,parallel=true,onComplete={if(autoQrLoop && foreground)continueQrScan()}) { account,api,guard ->
             val outcome=api.attendance(item)
             guard()
             if(outcome.successful) {
-                app.signing.ledger.reserve(account.id,item)
-                app.signing.ledger.record(account.id,item,"结果查询 · ${outcome.message}")
+                ledger.confirmSuccess(account.id,item)
+                ledger.record(account.id,item,"结果查询 · ${outcome.message}")
             }
             StepResult(outcome=outcome)
         }
@@ -194,6 +204,7 @@ class MultiAccountSignActivity:Activity() {
         val choices=chosen.associateWith(::skipReason)
         val ready=chosen.filter{choices[it]==null}
         if(ready.isEmpty()){state.text="所选账号没有可提交的签到：${choices.values.filterNotNull().distinct().joinToString("；")}。";return}
+        if(ready.all{plans[it.id]?.mode==SignMode.QR}){prepareAndScan();return}
         if(ready.any{plans[it.id]?.mode==SignMode.PHOTO && photos[it.id]?.isFile!=true}){state.text="请分别选择需要照片的账号的本次照片。";return}
         if(ready.any{plans[it.id]?.mode==SignMode.CODE} && !Regex("[0-9]{4,16}").matches(code)){state.text="请填写老师公布的签到码。";return}
         if(ready.any{plans[it.id]?.mode==SignMode.QR} && qr?.activityId!=item.id){state.text="请先扫描本次签到的当前二维码。";return}
@@ -205,7 +216,7 @@ class MultiAccountSignActivity:Activity() {
             .setNegativeButton("取消",null).setPositiveButton("提交所选账号一次"){_,_->
                 choices.forEach{(account,reason)->if(reason!=null)notes[account.id]=reason}
                 runAccounts(ready,"正在提交所选账号…",Step.SUBMIT,parallel=ready.all{selectedModes[it.id]==SignMode.QR}) {account,api,check->
-                    val outcome=SignSubmission(app.signing.ledger).submit(account.id,item,api,
+                    val outcome=SignSubmission(ledger).submit(account.id,item,api,
                         SignInputs(code=selectedCode,photo=selectedPhotos[account.id],fix=selectedFix,expectedMode=selectedModes[account.id],qr=selectedQr,gesture=selectedGesture),check)
                     StepResult(outcome=outcome)
                 }
@@ -231,21 +242,23 @@ class MultiAccountSignActivity:Activity() {
         content.addView(StudyUi.text(activity,"结果按账号分别显示。结果未知时不会自动重试。",12))
         return ScrollView(activity).apply{addView(content)}
     }
-    private fun runAccounts(chosen:List<BoundAccount>,message:String,step:Step,parallel:Boolean=false,action:(BoundAccount,SignSource,()->Unit)->StepResult) {
+    private fun runAccounts(chosen:List<BoundAccount>,message:String,step:Step,parallel:Boolean=false,onComplete:(()->Unit)?=null,action:(BoundAccount,SignSource,()->Unit)->StepResult) {
         if(busy)return
-        val token=++generation;busy=true;state.text=message;render()
+        val token=++generation;busy=true;state.text=message
+        if(parallel && step==Step.SUBMIT)main.post{if(!closed && token==generation && busy)render()} else render()
         task=worker.submit {
             val completed=java.util.concurrent.atomic.AtomicInteger()
             fun runOne(account:BoundAccount,index:Int) {
                 if(closed || token!=generation || Thread.currentThread().isInterrupted)return
                 val result=try {
                     guard(account,token)
-                    val api=sourceFactory?.invoke(account){guard(account,token)} ?: SigningApi(account.cookies.toList(),{guard(account,token)},allowCode=true,allowQr=true,allowGesture=true)
+                    fun sessionGuard(){if(closed || Thread.currentThread().isInterrupted || !accountStore.current(account))throw java.util.concurrent.CancellationException()}
+                    val api=preparedSources[account.id] ?: (sourceFactory?.invoke(account,::sessionGuard) ?: SigningApi(account.cookies.toList(),::sessionGuard,allowCode=true,allowQr=true,allowGesture=true))
                     activeSources.add(api)
                     try {
                         guard(account,token)
                         DiagnosticLog.operation("BatchSignAccount","account=${DiagnosticLog.reference(account.id)} ${DiagnosticLog.activity(item)} step=${index+1}/${chosen.size} parallel=$parallel"){action(account,api){guard(account,token)}}
-                    } finally {activeSources.remove(api);api.cancel()}
+                    } finally {activeSources.remove(api);if(preparedSources[account.id]!==api)api.cancel()}
                 } catch(e:java.util.concurrent.CancellationException){return}
                 catch(e:Exception){DiagnosticLog.error("BatchSignAccount",e);StepResult(message=if(e is ApiProblem || e is LoginRequired)e.message.orEmpty() else "此账号的操作未能确认，请刷新结果。")}
                 main.post {
@@ -255,12 +268,15 @@ class MultiAccountSignActivity:Activity() {
                         result.plan?.let{plans[id]=it}
                         result.outcome?.let{outcome->
                             if(step==Step.SUBMIT){submitResults[id]=outcome;queryResults.remove(id)}
-                            if(step==Step.QUERY)queryResults[id]=outcome
+                            if(step==Step.QUERY) {
+                                queryResults[id]=outcome
+                                if(id !in confirmed && submitResults[id]?.successful!=true && ledger.recoverUnsubmittedQr(id,item.copy(otherId=if(plans[id]?.mode==SignMode.QR)2 else item.otherId),outcome))submitResults.remove(id)
+                            }
                             if(outcome.successful)confirmed[id]=outcome
                         }
                         if(result.message!=null)notes[id]=result.message else notes.remove(id)
                         state.text="已处理 $count / ${chosen.size}"
-                        render()
+                        if(!parallel)render()
                     }
                 }
             }
@@ -268,7 +284,7 @@ class MultiAccountSignActivity:Activity() {
             val pending=mutableListOf<Future<*>>()
             try {
                 if(parallel && chosen.size>1) {
-                    pool=Executors.newFixedThreadPool(minOf(3,chosen.size))
+                    pool=Executors.newFixedThreadPool(minOf(10,chosen.size))
                     chosen.forEachIndexed{index,account->pending+=pool!!.submit{runOne(account,index)}}
                     pending.forEach{it.get()}
                 } else chosen.forEachIndexed{index,account->runOne(account,index)}
@@ -276,9 +292,61 @@ class MultiAccountSignActivity:Activity() {
             catch(e:Exception){DiagnosticLog.error("BatchSign",e)}
             finally {
                 pending.forEach{if(!it.isDone)it.cancel(true)};pool?.shutdownNow()
-                main.post{if(!closed && token==generation){busy=false;task=null;state.text="处理结束，请查看每个账号的结果。";render()}}
+                main.post{if(!closed && token==generation){busy=false;task=null;state.text="处理结束，请查看每个账号的结果。";render();onComplete?.invoke()}}
             }
         }
+    }
+    @Suppress("DEPRECATION")
+    private fun prepareAndScan() {
+        if(busy || closed)return
+        val ready=chosen().filter{skipReason(it)==null && plans[it.id]?.mode==SignMode.QR}
+        if(ready.isEmpty()){state.text="请先选择账号并核对二维码签到要求。";return}
+        if(ready.any{plans[it.id]?.requiresLocation==true} && runCatching{fix?.requireCurrent() ?: throw ApiProblem("未定位")}.isFailure){state.text="请先更新本次手机定位，再扫码。";return}
+        autoQrLoop=true;qr=null
+        runAccounts(ready,"正在提前准备所选账号和网络连接…",Step.CHECK,parallel=true,onComplete={
+            val prepared=ready.filter{preparedTickets[it.id]?.current()==true && accountStore.current(it)}
+            if(prepared.isNotEmpty()) {
+                scanningAccounts=prepared.map{it.id}
+                openQrScanner(prepared)
+            } else state.text="所选账号尚未准备成功，请查看各账号提示后重试。"
+        }) {account,api,check->
+            check()
+            val ticket=preparedTickets[account.id]?.takeIf{it.current()} ?: api.prepareQr(item)
+            preparedSources[account.id]=api;preparedTickets[account.id]=ticket
+            StepResult(plan=ticket.plan)
+        }
+    }
+    private fun submitScannedQr(material:SignQr) {
+        val candidates=chosen().filter{it.id in scanningAccounts && skipReason(it)==null}
+        if(candidates.isEmpty() || busy)return
+        val ready=candidates.filter{preparedTickets[it.id]?.current()==true}
+        candidates.filterNot{it in ready}.forEach{notes[it.id]="准备已过期，请重新准备后扫描新码。"}
+        if(ready.isEmpty()){state.text="账号准备已过期，正在重新准备并扫描新码。";prepareAndScan();return}
+        val position=fix
+        lastQrEnc=material.enc
+        runAccounts(ready,"已识别，所选账号正在同时提交…",Step.SUBMIT,parallel=true,onComplete={
+            qr=null
+            if(submitResults.values.any{it.retryAllowed}) {rejectedQrEnc=material.enc;main.post{continueQrScan()}}
+            if(submitResults.values.any{it.category==SignResultCategory.UNKNOWN})main.postDelayed({if(!closed && foreground && !busy)refreshResults(automatic=true)},1_500)
+            if(chosen().all{it.id in confirmed})autoQrLoop=false
+        }) {account,api,check->
+            val outcome=SignSubmission(ledger).submit(account.id,item,api,
+                SignInputs(qr=material,fix=position,expectedMode=SignMode.QR,preparedQr=preparedTickets[account.id]),check)
+            StepResult(outcome=outcome)
+        }
+    }
+    @Suppress("DEPRECATION")
+    private fun openQrScanner(ready:List<BoundAccount>) {
+        if(closed || !autoQrLoop || ready.isEmpty())return
+        scanningAccounts=ready.map{it.id}
+        startActivityForResult(QrScanActivity.materialIntent(this,item.id,ready.first().id)
+            .putExtra("autoStartCamera",true).putExtra(QrScanActivity.REJECTED_ENC,rejectedQrEnc),QR)
+    }
+    private fun continueQrScan() {
+        if(closed || !foreground || busy || !autoQrLoop)return
+        val ready=chosen().filter{skipReason(it)==null && plans[it.id]?.mode==SignMode.QR}
+        if(ready.isEmpty())return
+        if(ready.all{preparedTickets[it.id]?.current()==true})openQrScanner(ready) else prepareAndScan()
     }
     private fun locate() {
         if(busy)return
@@ -288,9 +356,11 @@ class MultiAccountSignActivity:Activity() {
     }
     @Deprecated("Platform picker") override fun onActivityResult(request:Int,result:Int,data:Intent?) {
         super.onActivityResult(request,result,data)
+        if(request==QR && result!=RESULT_OK){autoQrLoop=false;qr=null;state.text="已停止扫码自动提交。"}
         if(request==QR && result==RESULT_OK && !busy) {
-            qr=data?.getStringExtra(QrScanActivity.MATERIAL)?.let(SignQr::parse)?.takeIf{it.activityId==item.id}
-            state.text=if(qr==null)"二维码与此活动不匹配，请重新扫描。" else "二维码已更新，请尽快核对并提交。";render();return
+            val scanned=SignQr.fromResult(data)?.takeIf{it.activityId==item.id}
+            if(scanned==null){state.text="二维码与此活动不匹配，请重新扫描。";render()}else submitScannedQr(scanned)
+            return
         }
         if(request!=PHOTO)return
         val owner=picking;picking=null
@@ -310,7 +380,9 @@ class MultiAccountSignActivity:Activity() {
         super.onRequestPermissionsResult(request,permissions,results)
         if(request==LOCATION && checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)==PackageManager.PERMISSION_GRANTED)locate()
     }
-    private fun cancel(){generation++;activeSources.toList().forEach{it.cancel()};task?.cancel(true);task=null;busy=false}
+    private fun cancel(){autoQrLoop=false;generation++;preparedSources.values.forEach{it.cancel()};preparedSources.clear();preparedTickets.clear();activeSources.toList().forEach{it.cancel()};task?.cancel(true);task=null;busy=false}
+    override fun onResume(){super.onResume();foreground=true}
+    override fun onPause(){foreground=false;super.onPause()}
     override fun onDestroy(){closed=true;cancel();dialog?.dismiss();if(::location.isInitialized)location.cancel();worker.shutdownNow();photos.values.forEach{it.delete()};photos.clear();previews.values.forEach{it.recycle()};previews.clear();super.onDestroy()}
     companion object {
         private const val PHOTO=5801;private const val LOCATION=5802;private const val QR=5803

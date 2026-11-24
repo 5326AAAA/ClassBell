@@ -66,7 +66,11 @@ class QrScanActivity:StudyActivity() {
         state.accessibilityLiveRegion=View.ACCESSIBILITY_LIVE_REGION_POLITE
         val intro=StudyUi.card(this,body)
         intro.addView(StudyUi.text(this,if(previewOnly)"本地识别测试" else "对准当前签到二维码",21,true))
-        intro.addView(StudyUi.text(this,if(previewOnly)"网页只接收识别状态，不会提交签到。" else "识别后核对课程与账号，再由你确认提交。",14))
+        intro.addView(StudyUi.text(this,when {
+            previewOnly->"网页只接收识别状态，不会提交签到。"
+            expectedId!=null->"账号与签到要求已在扫码前核对，识别当前码后立即提交。"
+            else->"先识别本次签到，账号准备完成后自动继续扫码并提交，无需手动确认。"
+        },14))
         intro.addView(StudyUi.text(this,"摄像头和相册都可使用 · 图片不上传",12,true,ModernUi.strongPrimary))
         viewfinder=FrameLayout(this).apply {
             visibility=View.GONE;isSaveFromParentEnabled=false
@@ -164,10 +168,11 @@ class QrScanActivity:StudyActivity() {
         if(!cameraCurrent(token) || raw.isEmpty())return
         val supported=raw.distinct().mapNotNull{SignQr.parse(it)}
         val expected=expectedId
-        val matching=supported.filter{expected==null || it.activityId==expected}
+        val matching=supported.filter{(expected==null || it.activityId==expected) && it.enc!=intent.getStringExtra(REJECTED_ENC)}
         val material=matching.singleOrNull()
         if(material!=null){showMaterial(material);return}
         val hint=when {
+            supported.any{it.enc==intent.getStringExtra(REJECTED_ENC)}->"这张码已失效，正在等待老师更新二维码。"
             matching.size>1->"画面中有多个签到二维码，请只对准一个。"
             supported.isNotEmpty()->"二维码与所选签到不一致，请继续扫描当前活动的二维码。"
             else->"这不是支持的签到二维码，请继续扫描。"
@@ -240,18 +245,13 @@ class QrScanActivity:StudyActivity() {
         showMaterial(material)
     }
     private fun showMaterial(material:SignQr) {
+        if(material.enc==intent.getStringExtra(REJECTED_ENC)){state.text="这张码已失效，请识别更新后的二维码。";return}
         stopCamera();settingsButton.visibility=View.GONE;result.removeAllViews()
         DiagnosticLog.event("QR", "decoded supported=true")
         if(previewOnly){selected=null;setResult(RESULT_OK);finish();return}
-        if(expectedId!=null){setResult(RESULT_OK,Intent().putExtra(MATERIAL,material.officialUrl));finish();return}
-        selected=material
-        state.text="二维码已识别，尚未提交签到。"
-        val card=StudyUi.card(this,result)
-        card.addView(StudyUi.text(this,"继续到应用内签到",20,true))
-        card.addView(StudyUi.text(this,"先核对此账号的课程。动态码可能已刷新，可在详情页重新扫描。多账号可从关联账号的课程活动进入，选好账号后再扫码。",14))
-        card.addView(StudyUi.button(this,"核对课程并继续",true){
-            if(usable() && resumed && !working)resolve(material)
-        })
+        if(expectedId!=null){setResult(RESULT_OK,Intent().putExtra(MATERIAL,material.officialUrl).putExtra(CAPTURED_AT,material.capturedAt));finish();return}
+        selected=null
+        resolve(material)
     }
     private fun resolve(material:SignQr) {
         signSource?.cancel()
@@ -262,7 +262,7 @@ class QrScanActivity:StudyActivity() {
             try { QrCourseLookup.find(material.activityId,courses,::guard,source::activities){DiagnosticLog.error("QrResolve",it)} }
             finally { source.cancel() }
         }){item->
-            if(usable()){startActivity(SignActionActivity.intent(this,item,boundAccountId=requestedBoundAccountId).putExtra(MATERIAL,material.officialUrl));finish()}
+            if(usable()){startActivity(SignActionActivity.intent(this,item,boundAccountId=requestedBoundAccountId).putExtra("autoScan",true));finish()}
         }
     }
 
@@ -302,7 +302,7 @@ class QrScanActivity:StudyActivity() {
     override fun onResume(){
         super.onResume();resumed=true
         if(!usable()){stopCamera();return}
-        val input=initialInput.also{initialInput=null}
+        val input=initialInput.also{initialInput=null} ?: if(intent.getBooleanExtra("autoStartCamera",false)){intent.removeExtra("autoStartCamera");PreviewInput.CAMERA}else null
         when {
             input==PreviewInput.CAMERA->startCamera(Engine.CAMERAX)
             input==PreviewInput.GALLERY->pickImage()
@@ -318,6 +318,8 @@ class QrScanActivity:StudyActivity() {
     }
     companion object {
         const val IMAGE=5401;const val CAMERA=5402;const val MATERIAL="signQrMaterial"
+        const val CAPTURED_AT="qrCapturedElapsed"
+        const val REJECTED_ENC="rejectedQrEnc"
         private const val PREVIEW_ONLY="scanPreviewOnly"
         private const val PREVIEW_INPUT="scanPreviewInput"
         internal fun previewIntent(activity:android.app.Activity,input:PreviewInput?=null)=Intent(activity,QrScanActivity::class.java)

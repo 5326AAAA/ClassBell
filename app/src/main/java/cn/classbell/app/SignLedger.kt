@@ -12,6 +12,50 @@ import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 class SignLedger(private val prefs: SharedPreferences) {
+    private class SubmissionState { val inFlight=mutableSetOf<String>() }
+    private companion object {
+        // Android returns one SharedPreferences object per file. Ledger wrappers must share
+        // both the reservation monitor and in-flight state for that file.
+        val submissionStates=java.util.WeakHashMap<SharedPreferences,SubmissionState>()
+        fun stateFor(prefs:SharedPreferences)=synchronized(submissionStates) {
+            submissionStates.getOrPut(prefs){SubmissionState()}
+        }
+    }
+    private val submissionState=stateFor(prefs)
+    private fun flightKey(identity:String,activity:SignActivity)="$identity:${accountKey(activity.key)}"
+    fun reserveSubmission(identity:String,activity:SignActivity):Boolean = synchronized(submissionState) {
+        val key=flightKey(identity,activity)
+        if(key in submissionState.inFlight || accountKey(activity.key) in prefs.getStringSet("sign.confirmed.$identity",emptySet()).orEmpty() ||
+            !reserve(identity,activity))return@synchronized false
+        submissionState.inFlight+=key
+        true
+    }
+    fun finishSubmission(identity:String,activity:SignActivity) = synchronized(submissionState) {
+        submissionState.inFlight.remove(flightKey(identity,activity))
+        Unit
+    }
+    fun confirmSuccess(identity:String,activity:SignActivity):Unit = synchronized(submissionState) {
+        reserve(identity,activity)
+        val field="sign.confirmed.$identity"
+        val key=accountKey(activity.key)
+        val previous=prefs.getStringSet(field,emptySet()).orEmpty()
+        if(key !in previous && !prefs.edit().putStringSet(field,previous+key).commit())
+            throw ApiProblem("未能保存签到成功状态，请先刷新结果。")
+    }
+    /** Publish the final result before another screen can reconcile a stale attendance query. */
+    fun completeSubmission(identity:String,activity:SignActivity,result:SignOutcome) = synchronized(submissionState) {
+        try {
+            if(result.successful)confirmSuccess(identity,activity)
+            else if(result.retryAllowed && result.category==SignResultCategory.FAILED)releaseRejected(identity,activity)
+        } finally { submissionState.inFlight.remove(flightKey(identity,activity)) }
+    }
+    /** An authenticated result for this activity/account can recover a previous uncertain QR attempt. */
+    fun recoverUnsubmittedQr(identity:String,activity:SignActivity,result:SignOutcome):Boolean = synchronized(submissionState) {
+        if(result.category!=SignResultCategory.NOT_SUBMITTED || result.successful || activity.otherId!=2 ||
+            flightKey(identity,activity) in submissionState.inFlight || accountKey(activity.key) in prefs.getStringSet("sign.confirmed.$identity",emptySet()).orEmpty())return@synchronized false
+        if(attempted(identity,activity))releaseRejected(identity,activity)
+        true
+    }
     private fun ignoreField(identity:String)="sign.ignored.$identity"
     private fun ignoredDetailsField(identity:String)="sign.ignoredDetails.$identity"
 
@@ -72,7 +116,11 @@ class SignLedger(private val prefs: SharedPreferences) {
         DiagnosticLog.event("SignDetection","account=${DiagnosticLog.reference(identity)} ${DiagnosticLog.activity(activity)} ignored=$ignored")
     }
 
-    @Synchronized fun attempted(identity:String,activity:SignActivity)=accountKey(activity.key) in prefs.getStringSet("sign.attempts.$identity",emptySet()).orEmpty()
+    @Synchronized fun attempted(identity:String,activity:SignActivity):Boolean {
+        val key=accountKey(activity.key)
+        return key in prefs.getStringSet("sign.attempts.$identity",emptySet()).orEmpty() ||
+            key in prefs.getStringSet("sign.confirmed.$identity",emptySet()).orEmpty()
+    }
     /** Automatic preflight cooldown is independent of the final submission reservation. */
     @Synchronized fun allowAutomaticCheck(identity:String,activity:SignActivity):Boolean {
         if(ignored(identity,activity.key) || attempted(identity,activity))return false
@@ -85,18 +133,21 @@ class SignLedger(private val prefs: SharedPreferences) {
         recent.put(key,now)
         return prefs.edit().putString(field,recent.toString()).commit()
     }
-    @Synchronized fun reserve(identity: String, activity: SignActivity): Boolean {
+    fun reserve(identity: String, activity: SignActivity): Boolean = synchronized(submissionState) {
         val field = "sign.attempts.$identity"
         val previous = prefs.getStringSet(field, emptySet()).orEmpty()
         val key = accountKey(activity.key)
-        if (key in previous) {DiagnosticLog.event("SignLedger", "${DiagnosticLog.activity(activity)} skipped reason=already_attempted");return false}
-        return prefs.edit().putStringSet(field, (previous.toList().takeLast(999)+key).toSet()).commit()
+        if (key in previous) {DiagnosticLog.event("SignLedger", "${DiagnosticLog.activity(activity)} skipped reason=already_attempted");return@synchronized false}
+        prefs.edit().putStringSet(field, (previous.toList().takeLast(999)+key).toSet()).commit()
     }
     /** Only a definitive server rejection may release a commit. Unknown replies remain reserved. */
-    @Synchronized fun releaseRejected(identity:String,activity:SignActivity) {
+    fun releaseRejected(identity:String,activity:SignActivity) = synchronized(submissionState) {
         val field="sign.attempts.$identity"
         val previous=prefs.getStringSet(field,emptySet()).orEmpty()
-        if(!prefs.edit().putStringSet(field,previous-accountKey(activity.key)).commit())throw ApiProblem("未能保存拒绝结果，请先核对记录。")
+        val key=accountKey(activity.key)
+        // A late rejection from an earlier request cannot erase confirmed success.
+        if(key in prefs.getStringSet("sign.confirmed.$identity",emptySet()).orEmpty())return@synchronized
+        if(key in previous && !prefs.edit().putStringSet(field,previous-key).commit())throw ApiProblem("未能保存拒绝结果，请先核对记录。")
         DiagnosticLog.event("SignLedger","account=${DiagnosticLog.reference(identity)} ${DiagnosticLog.activity(activity)} released=confirmed_rejection")
     }
     @Synchronized fun record(identity: String, activity: SignActivity, message: String) {

@@ -18,6 +18,7 @@ import android.provider.Settings
 import android.text.InputType
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
 import android.widget.*
 import org.json.JSONObject
 import java.util.concurrent.Executors
@@ -29,7 +30,7 @@ class MainActivity : Activity() {
     private val teal = ModernUi.primary
     private val ink = ModernUi.ink
     private val muted = ModernUi.muted
-    private val pages = mutableListOf<ScrollView>()
+    private val pages = mutableListOf<ViewGroup>()
     private val navigation = mutableListOf<Button>()
     private val routes = listOf("home", "courses", "homework", "test", "settings","profile","account","signing","monitor-courses","receipts","tools")
     private val primaryPages=listOf(0,1,2,5)
@@ -156,8 +157,14 @@ class MainActivity : Activity() {
             tools={showPage(toolsPage)},
             savedCount={accountShelf.list().size},
             scan={if(app.prefs.getBoolean("loggedIn",false))startActivity(Intent(this,QrScanActivity::class.java)) else showPage(6)})
-        myBody.setPadding(dp(20),dp(8),dp(20),dp(8))
-        myBody.addView(profilePanel,LinearLayout.LayoutParams(-1,0,1f))
+        // The profile owns one content scroller and a fixed footer.
+        val oldProfilePage = myBody.parent as ScrollView
+        val profileIndex = pages.indexOf(oldProfilePage)
+        pageHost.removeView(oldProfilePage)
+        profilePanel.setPadding(dp(20),dp(8),dp(20),dp(8))
+        pageHost.addView(profilePanel,FrameLayout.LayoutParams(minOf(resources.displayMetrics.widthPixels,dp(640)),-1,
+            Gravity.TOP or Gravity.CENTER_HORIZONTAL))
+        pages[profileIndex] = profilePanel
         toolsBody.addView(profileAction("运行日志与故障反馈","courses"){
             startActivity(Intent(this,DiagnosticActivity::class.java))
         })

@@ -20,11 +20,7 @@ data class SignRequirements(val lines:List<String> = emptyList(),val unsupported
             val lines=mutableListOf<String>()
             if(flag("ifphoto")==true || flag("ifPhoto")==true)lines+="照片：需要"
             fields.filter{flag(it.key)==true}.forEach{(key,label)->lines+="$label：需要${if(key=="ifopenAddress")"本次定位" else " · 待修复"}"}
-            when(flag("ifrefreshewm")) {
-                true->lines+="二维码自动更新：已开启；刷新周期尚未取得"
-                false->lines+="二维码自动更新：未开启"
-                null->if(data.optString("otherId")=="2" || data.optString("otherid")=="2")lines+="二维码刷新周期：尚未取得"
-            }
+            if(data.optString("otherId")=="2" || data.optString("otherid")=="2")lines+=QrRefreshInfo.read(data).description()
             val rawTimes=listOf("endTime","endtime").mapNotNull{data.optString(it).toLongOrNull()?.takeIf{v->v>0}}.distinct()
             if(rawTimes.size==1) {
                 val raw=rawTimes.single();val millis=if(raw in 1_000_000_000L..9_999_999_999L)raw*1000 else raw

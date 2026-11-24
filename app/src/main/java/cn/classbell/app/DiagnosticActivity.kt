@@ -33,6 +33,8 @@ class DiagnosticActivity : Activity() {
         }
         root.addView(StudyUi.header(this, "运行日志与故障反馈") { finish() }.first)
         root.addView(StudyUi.text(this, "日志自动记录。出现问题后点“分享日志到微信”，选联系人发送；也可保存 TXT 文件。日志包含课程、作业、活动和资料名称，账号使用匿名标识；不记录密码、Cookie、答题正文、照片或精确坐标。", 13))
+        if (BuildConfig.DEBUG) root.addView(StudyUi.text(this,
+            "开发版 · USB/ADB 调试桥已启用。电脑可通过配套 codex-device.ps1 读取权限、后台、网络和内存状态，或收集本应用诊断日志。首次连接须在手机允许 USB 调试；无需 Root。", 12))
         state = StudyUi.text(this, "", 12); root.addView(state)
         fun action(title: String, primary: Boolean = false, block: () -> Unit) {
             StudyUi.button(this, title, primary, block).also { actions += it; root.addView(it) }

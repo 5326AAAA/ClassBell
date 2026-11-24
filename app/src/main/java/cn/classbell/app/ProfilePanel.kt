@@ -7,7 +7,6 @@ import android.graphics.Typeface
 import android.graphics.drawable.RippleDrawable
 import android.text.TextUtils
 import android.view.Gravity
-import android.view.View
 import android.widget.*
 
 class ProfilePanel(
@@ -16,22 +15,30 @@ class ProfilePanel(
     bindings: () -> Unit, settings: () -> Unit, tools: () -> Unit,
     private val savedCount: () -> Int, scan: () -> Unit
 ) : LinearLayout(activity) {
-    private val name = label("登录学习通", 23, true)
-    private val accountStatus = label("", 13)
-    private val courseCount = label("", 21, true)
-    private val reminderCount = label("", 21, true)
-    private val accounts = label("", 21, true)
+    private val name = label("登录学习通", 21, true)
+    private val accountStatus = label("", 12)
+    private val courseCount = label("", 18, true)
+    private val reminderCount = label("", 18, true)
+    private val accounts = label("", 18, true)
+    private val permissions = FeaturePermissionsPanel(activity)
     private val hero = column()
+    private val content = column()
 
     init {
         orientation = VERTICAL
+        addView(ScrollView(activity).apply {
+            contentDescription = "我的页面"
+            isFillViewport = true
+            isVerticalScrollBarEnabled = false
+            addView(content, FrameLayout.LayoutParams(-1, -2))
+        }, LayoutParams(-1, 0, 1f))
         hero.apply {
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(20), dp(18), dp(20), dp(18))
+            setPadding(dp(16), dp(10), dp(16), dp(10))
             background = ModernUi.shape(activity, Color.WHITE, 22)
         }
         val identity = LinearLayout(activity).apply { gravity = Gravity.CENTER_VERTICAL }
-        identity.addView(ModernUi.avatar(activity), LayoutParams(dp(56), dp(56)))
+        identity.addView(ModernUi.avatar(activity), LayoutParams(dp(44), dp(44)))
         val details = column().apply {
             setPadding(dp(10), 0, dp(6), 0)
             addView(name.apply { maxLines = 2; ellipsize = TextUtils.TruncateAt.END })
@@ -50,15 +57,15 @@ class ProfilePanel(
             val metric = column().apply {
                 gravity = Gravity.CENTER
                 addView(value.apply { gravity = Gravity.CENTER })
-                addView(label(title, 12).apply {
+                addView(label(title, 11).apply {
                     gravity = Gravity.CENTER
-                    setPadding(0, dp(4), 0, 0)
+                    setPadding(0, dp(2), 0, 0)
                 })
             }
             metrics.addView(metric, LayoutParams(0, -2, 1f))
         }
-        hero.addView(metrics, LayoutParams(-1, -2).apply { topMargin = dp(24) })
-        addView(hero, LayoutParams(-1, -2))
+        hero.addView(metrics, LayoutParams(-1, -2).apply { topMargin = dp(8) })
+        content.addView(hero, LayoutParams(-1, -2, 1f))
 
         val signCard = LinearLayout(activity).apply {
             minimumHeight = dp(96)
@@ -83,9 +90,9 @@ class ProfilePanel(
             addView(label("当前活动与历史结果", 12).apply { setTextColor(0xFFCEE6DA.toInt()) })
         }, LayoutParams(0, -2, 1f))
         signCard.addView(label("›", 21).apply { setTextColor(Color.WHITE) })
-        addView(signCard, LayoutParams(-1, -2).apply { topMargin = dp(12) })
+        content.addView(signCard, LayoutParams(-1, -2).apply { topMargin = dp(12) })
 
-        addView(label("常用工具", 14, true).apply { setPadding(0, dp(16), 0, dp(8)) })
+        content.addView(label("常用工具", 14, true).apply { setPadding(0, dp(16), 0, dp(8)) })
         val quickRow = LinearLayout(activity)
         val shortcuts = listOf(
             shortcut("提醒课程", "courses", pickCourses),
@@ -97,8 +104,10 @@ class ProfilePanel(
                 if (index > 0) marginStart = dp(8)
             })
         }
-        addView(quickRow, LayoutParams(-1, -2))
+        content.addView(quickRow, LayoutParams(-1, -2))
 
+        content.addView(permissions, LayoutParams(-1, -2).apply { topMargin = dp(8) })
+        // Links and credits stay outside the scroller when permission details expand.
         val links = LinearLayout(activity)
         for ((title, action) in listOf("提醒设置" to settings, "更多工具" to tools)) {
             val start = title == "提醒设置"
@@ -110,21 +119,13 @@ class ProfilePanel(
             }, LayoutParams(0, -2, 1f))
         }
         addView(links, LayoutParams(-1, -2).apply { topMargin = dp(8) })
-        addView(View(activity), LayoutParams(-1, 0, 1f))
-        addView(label("Class Bell ${BuildConfig.VERSION_NAME}\n作者：Forest5326", 12).apply {
+        addView(label("Class Bell ${BuildConfig.VERSION_NAME} · 作者：Forest5326", 12).apply {
             gravity = Gravity.CENTER
-            setLineSpacing(dp(2).toFloat(), 1f)
-            setPadding(0, dp(16), 0, dp(8))
+            maxLines = 1
+            setAutoSizeTextTypeUniformWithConfiguration(9, 12, 1, android.util.TypedValue.COMPLEX_UNIT_SP)
+            setPadding(0, dp(8), 0, dp(4))
         }, LayoutParams(-1, -2))
         render()
-    }
-
-    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-        // On smaller screens or with large text, the page can grow and scroll.
-        val viewport = MeasureSpec.getSize(heightMeasureSpec)
-        val minimum = maxOf(dp(154), viewport / 2 - dp(108))
-        if (hero.minimumHeight != minimum) hero.minimumHeight = minimum
-        super.onMeasure(widthMeasureSpec, heightMeasureSpec)
     }
 
     fun render() {
@@ -138,6 +139,7 @@ class ProfilePanel(
         courseCount.text = (if (logged) app.courses().size else 0).toString()
         reminderCount.text = (if (logged) app.selectedCourses().size else 0).toString()
         accounts.text = savedCount().toString()
+        permissions.render()
     }
 
     private fun shortcut(title: String, icon: String, action: () -> Unit): LinearLayout {

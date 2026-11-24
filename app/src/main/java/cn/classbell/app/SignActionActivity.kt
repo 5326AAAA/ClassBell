@@ -14,10 +14,19 @@ import java.io.File
 class SignActionActivity:StudyActivity() {
     override val requestedBoundAccountId:String? get()=intent.getStringExtra("boundAccountId")
     internal var sourceFactory:((()->Unit)->SignSource)?=null
+    // Instrumented tests supply an isolated ledger and trace sink before onCreate.
+    internal var ledgerRepository:SignLedger?=null
+    internal var requirementTrace:(String)->Unit={AlertTrace.add(this,it)}
+    private val ledger get()=ledgerRepository ?: app.signing.ledger
     private lateinit var sign:SignActivity
     private lateinit var source:SignSource
     private lateinit var deviceLocation:DeviceLocation
     private var qr:SignQr?=null
+    private var preparedQr:PreparedQr?=null
+    private var autoQrLoop=false
+    private var rejectedQrEnc:String?=null
+    private var lastQrEnc:String?=null
+    private var foreground=false
     private var gesture=""
     private var fix:LocationFix?=null
     private var manualPoint:ManualLocation?=null
@@ -32,7 +41,7 @@ class SignActionActivity:StudyActivity() {
     private val monitoredPhoto get()=intent.getBooleanExtra("monitoredPhoto",false)
     private val historyOnly get()=intent.getBooleanExtra("historyOnly",false)
     private val ended get()=historyOnly || overview?.status==2 || plan?.issueCode=="ACTIVITY_ENDED"
-    private fun submissionLocked()=lastOutcome?.locksSignSubmission==true || app.signing.ledger.attempted(sessionOwner,sign)
+    private fun submissionLocked()=lastOutcome?.locksSignSubmission==true || ledger.attempted(sessionOwner,sign)
     override fun onCreate(savedInstanceState:Bundle?) {
         super.onCreate(savedInstanceState)
         if(!valid()){finish();return}
@@ -42,7 +51,7 @@ class SignActionActivity:StudyActivity() {
         titleView.text=when { historyOnly->"签到结果"; sign.otherId==4->"位置签到"; else->"签到详情" }
         source=sourceFactory?.invoke(::guardCourse) ?: SigningApi(sessionCookies,::guardCourse,allowCode=true,allowQr=true,allowGesture=true)
         deviceLocation=DeviceLocation(this)
-        qr=intent.getStringExtra(QrScanActivity.MATERIAL)?.let(SignQr::parse)?.takeIf{it.activityId==sign.id}
+        qr=null // Never reuse material carried through course discovery or page recreation.
         render()
         if(historyOnly)checkAttendance() else checkRequirements()
     }
@@ -57,9 +66,12 @@ class SignActionActivity:StudyActivity() {
             plan=result
             overview=result.overview
             if(result.mode==SignMode.PHOTO)titleView.text="拍照签到"
-            AlertTrace.add(this,"核对签到详情 · ${result.message}")
+            requirementTrace("核对签到详情 · ${result.message}")
             render()
-            if(result.issueCode in setOf("ACTIVITY_NOT_ACTIVE","ACTIVITY_ENDED"))checkAttendance()
+            if(result.issueCode in setOf("ACTIVITY_NOT_ACTIVE","ACTIVITY_ENDED") || (result.mode==SignMode.QR && submissionLocked()))checkAttendance()
+            else if(result.mode==SignMode.QR && intent.getBooleanExtra("autoScan",false)){
+                intent.removeExtra("autoScan");prepareAndScan()
+            }
         }
     }
     private fun render() {
@@ -126,16 +138,15 @@ class SignActionActivity:StudyActivity() {
                 details.addView(StudyUi.button(this,"确认签到码并提交",true){confirm(input.text.toString())})
             }
             SignMode.QR -> {
-                details.addView(StudyUi.text(this,if(qr==null)"尚未扫描本次二维码" else "二维码已识别，活动编号已核对。动态码可能随时更新。",13))
-                details.addView(StudyUi.button(this,if(qr==null)"扫描 / 相册识别二维码" else "重新扫描当前二维码",true){
-                    if(!working){@Suppress("DEPRECATION") startActivityForResult(QrScanActivity.materialIntent(this,sign.id,requestedBoundAccountId),PICK_QR)}
-                })
+                details.addView(StudyUi.text(this,plan?.qrRefresh?.description().orEmpty(),13,true,ModernUi.strongPrimary))
+                details.addView(StudyUi.text(this,"先准备账号和签到要求；识别后立即提交，无需再次确认。",13))
+                details.addView(StudyUi.button(this,"扫码并立即提交",true){prepareAndScan()}.apply{isEnabled=!working})
                 if(plan?.requiresLocation==true) {
                     details.addView(StudyUi.text(this,fix?.let{"本次位置：${it.latitude}, ${it.longitude}"} ?: "本次二维码还要求手机位置。",13))
                     details.addView(StudyUi.button(this,"更新本次手机定位"){locate()})
                 }
                 details.addView(StudyUi.text(this,"在 ClassBell 内在线提交，结果在本页显示。",13))
-                details.addView(StudyUi.button(this,"确认二维码并提交",true){confirm()}.apply{isEnabled=qr!=null && !working})
+
             }
             SignMode.GESTURE -> {
                 details.addView(gestureInput(this,gesture,!working){gesture=it})
@@ -176,7 +187,7 @@ class SignActionActivity:StudyActivity() {
         val tools=StudyUi.column(this)
         body.addView(tools)
         if(includeDetection) {
-            val ignored=app.signing.ledger.ignored(sessionOwner,sign.key)
+            val ignored=ledger.ignored(sessionOwner,sign.key)
             tools.addView(StudyUi.button(this,if(ignored)"恢复检测这个签到" else "不检测这个签到"){
                 if(valid() && !working) {
                     app.setSignDetectionIgnored(sessionOwner,sign,!ignored)
@@ -218,13 +229,57 @@ class SignActionActivity:StudyActivity() {
             if(metadata!=null)overview=metadata
             resultCheck=result
             if(result.successful) {
+                autoQrLoop=false
                 lastOutcome=result.copy(photoState=lastOutcome?.photoState ?: PhotoTransferState.NOT_SENT)
-                app.signing.ledger.reserve(sessionOwner,sign)
-                app.signing.ledger.record(sessionOwner,sign,"结果查询 · ${result.message}")
+                ledger.confirmSuccess(sessionOwner,sign)
+                ledger.record(sessionOwner,sign,"结果查询 · ${result.message}")
                 qr=null;gesture="";clearPhoto()
             }
+            if(lastOutcome?.successful!=true && ledger.recoverUnsubmittedQr(sessionOwner,sign.copy(otherId=if(plan?.mode==SignMode.QR)2 else sign.otherId),result)) {
+                lastOutcome=null;qr=null;preparedQr=null
+                state.text="学习通确认未签到，可以重新扫描当前码立即提交。"
+            }
             render()
+            if(autoQrLoop && foreground && lastQrEnc!=null && !submissionLocked() && result.category==SignResultCategory.NOT_SUBMITTED) {
+                rejectedQrEnc=lastQrEnc;main.post{continueQrScan()}
+            }
         }
+    }
+    @Suppress("DEPRECATION")
+    private fun prepareAndScan() {
+        if(!valid() || working || ended || submissionLocked())return
+        if(plan?.requiresLocation==true && runCatching{fix?.requireCurrent() ?: throw ApiProblem("未定位")}.isFailure){state.text="请先更新本次手机定位，再扫码。";return}
+        autoQrLoop=true;qr=null
+        work("正在准备账号和网络连接…",{source.prepareQr(sign)}) {prepared->
+            preparedQr=prepared;plan=prepared.plan;overview=prepared.plan.overview ?: overview
+            render()
+            openQrScanner()
+        }
+    }
+    private fun submitScannedQr(material:SignQr) {
+        if(!valid() || working || ended || submissionLocked())return
+        val prepared=preparedQr
+        if(prepared==null || !prepared.current()) {preparedQr=null;state.text="扫码准备已过期，正在重新准备。";prepareAndScan();return}
+        val owner=sessionOwner
+        lastQrEnc=material.enc
+        work("已识别，正在立即提交…",{
+            SignSubmission(ledger).submit(owner,sign,source,SignInputs(qr=material,fix=fix,expectedMode=SignMode.QR,preparedQr=prepared),::guardCourse)
+        }) {outcome->
+            lastOutcome=outcome;resultCheck=null;qr=null;state.text=outcome.message;render()
+            if(outcome.successful)autoQrLoop=false
+            else if(outcome.retryAllowed) {rejectedQrEnc=material.enc;main.post{continueQrScan()}}
+            else if(outcome.category==SignResultCategory.UNKNOWN)main.postDelayed({if(valid() && !working)checkAttendance()},1_500)
+        }
+    }
+    @Suppress("DEPRECATION")
+    private fun openQrScanner() {
+        if(!valid() || !autoQrLoop || ended)return
+        startActivityForResult(QrScanActivity.materialIntent(this,sign.id,requestedBoundAccountId)
+            .putExtra("autoStartCamera",true).putExtra(QrScanActivity.REJECTED_ENC,rejectedQrEnc),PICK_QR)
+    }
+    private fun continueQrScan() {
+        if(!valid() || !foreground || working || !autoQrLoop || ended || submissionLocked())return
+        if(preparedQr?.current()==true)openQrScanner() else prepareAndScan()
     }
     private fun renderPhoto() {
         val card=StudyUi.card(this,body)
@@ -289,7 +344,7 @@ class SignActionActivity:StudyActivity() {
                 val owner=sessionOwner
                 if(mode==SignMode.PHOTO){submittingPhoto=true;render()}
                 work("正在提交，请勿重复操作…",{
-                    SignSubmission(app.signing.ledger).submit(owner,sign,source,
+                    SignSubmission(ledger).submit(owner,sign,source,
                         SignInputs(code=code,photo=selectedPhoto,fix=selectedFix,point=selectedPoint,expectedMode=mode,qr=selectedQr,gesture=selectedGesture),::guardCourse)
                 }){result->
                     lastOutcome=result
@@ -304,9 +359,10 @@ class SignActionActivity:StudyActivity() {
     }
     @Deprecated("Platform picker") override fun onActivityResult(code:Int,result:Int,data:Intent?) {
         super.onActivityResult(code,result,data)
+        if(code==PICK_QR && result!=RESULT_OK){autoQrLoop=false;qr=null;state.text="已停止扫码自动提交。"}
         if(code==PICK_QR && result==RESULT_OK && valid() && !working) {
-            qr=data?.getStringExtra(QrScanActivity.MATERIAL)?.let(SignQr::parse)?.takeIf{it.activityId==sign.id}
-            state.text=if(qr==null)"二维码与当前活动不匹配，请重扫。" else "二维码已更新，请确认提交。";render()
+            val scanned=SignQr.fromResult(data)?.takeIf{it.activityId==sign.id}
+            if(scanned==null){state.text="二维码与当前活动不匹配，请重扫。";render()} else submitScannedQr(scanned)
         }
         if(code==PICK_LOCATION && result==RESULT_OK && data!=null && valid()) {
             diagnosticRunCatching{ManualLocation.fromIntent(data)}
@@ -327,6 +383,8 @@ class SignActionActivity:StudyActivity() {
         }
     }
     override fun onRequestPermissionsResult(code:Int,permissions:Array<out String>,results:IntArray){super.onRequestPermissionsResult(code,permissions,results);DiagnosticLog.event("Permissions", "request=$code granted=${results.count{it==android.content.pm.PackageManager.PERMISSION_GRANTED}} total=${results.size}");if(code==LOCATION){if(checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)==PackageManager.PERMISSION_GRANTED)locate() else state.text="需要允许精确定位，也可使用官方页面处理。"}}
+    override fun onResume(){super.onResume();foreground=true}
+    override fun onPause(){foreground=false;super.onPause()}
     override fun onStop(){if(::deviceLocation.isInitialized)deviceLocation.cancel();super.onStop()}
     override fun onDestroy(){dialog?.dismiss();clearPhoto();if(::source.isInitialized)source.cancel();if(::deviceLocation.isInitialized)deviceLocation.cancel();super.onDestroy()}
     companion object {

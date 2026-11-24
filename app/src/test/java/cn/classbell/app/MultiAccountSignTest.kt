@@ -24,6 +24,8 @@ import org.robolectric.annotation.LooperMode
 import org.robolectric.shadows.ShadowAlertDialog
 import java.io.File
 import java.io.IOException
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.AtomicBoolean
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk=[35],application=BellApp::class,qualifiers="zh-rCN-w390dp-h844dp-mdpi")
@@ -39,9 +41,9 @@ class MultiAccountSignTest {
         app.prefs.edit().clear().commit()
         var json:String?=null;val accounts=BoundAccounts({json},{json=it})
         val bound=(1..2).map{i->accounts.bind("合成账号 $i",listOf(Cookie.Builder().name("_uid").value("90$i").domain("chaoxing.com").path("/").secure().build()),listOf(course))}
-        val sends=mutableListOf<String>()
-        val queries=mutableListOf<String>()
-        var confirmedReply=true
+        val sends=ConcurrentLinkedQueue<String>()
+        val queries=ConcurrentLinkedQueue<String>()
+        val confirmedReply=AtomicBoolean(true)
         val page=Intent(app,MultiAccountSignActivity::class.java).putExtra("courseKey",course.key).putExtra("activeId",item.id).putExtra("title",item.title).putExtra("otherId",0)
         val controller=Robolectric.buildActivity(MultiAccountSignActivity::class.java,page)
         controller.get().accountRepository=accounts
@@ -50,7 +52,7 @@ class MultiAccountSignTest {
             override fun plan(activity:SignActivity):SignPlan{guard();return SignPlan(SignMode.NORMAL,"普通签到")}
             override fun attendance(activity:SignActivity):SignOutcome {
                 guard();queries+=account.id
-                return if(account.id==bound.last().id && confirmedReply)SignOutcome(true,"已确认签到")
+                return if(account.id==bound.last().id && confirmedReply.get())SignOutcome(true,"已确认签到")
                 else SignOutcome(false,"尚未签到",SignResultCategory.NOT_SUBMITTED)
             }
             override fun submit(activity:SignActivity,photo:File?,beforeCommit:()->Unit):SignOutcome {
@@ -76,9 +78,9 @@ class MultiAccountSignTest {
             assertTrue(sends.isEmpty())
             confirmation.getButton(AlertDialog.BUTTON_POSITIVE).performClick()
             await{text().contains("处理结束") && text().contains("成功 · 签到成功")}
-            if(unbindFirst){assertEquals(listOf(bound.last().id),sends);assertTrue(text().contains("解绑"))}
+            if(unbindFirst){assertEquals(setOf(bound.last().id),sends.toSet());assertEquals(1,sends.size);assertTrue(text().contains("解绑"))}
             else {
-                assertEquals(bound.map{it.id},sends);assertTrue(text().contains("结果待核实"))
+                assertEquals(bound.map{it.id}.toSet(),sends.toSet());assertEquals(bound.size,sends.size);assertTrue(text().contains("结果待核实"))
                 root.measure(View.MeasureSpec.makeMeasureSpec(390,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(844,View.MeasureSpec.EXACTLY));root.layout(0,0,390,844)
                 val bitmap=Bitmap.createBitmap(390,844,Bitmap.Config.ARGB_8888);val canvas=Canvas(bitmap);canvas.drawColor(ModernUi.background);root.draw(canvas)
                 val cwd=File(System.getProperty("user.dir"));val project=if(File(cwd,"app/src").exists())cwd else cwd.parentFile
@@ -87,12 +89,13 @@ class MultiAccountSignTest {
                 assertFalse(button("确认所选账号并提交").isEnabled)
                 button("刷新所选账号的签到结果").performClick()
                 await{text().contains("处理结束") && text().contains("已确认签到")}
-                assertEquals(bound.map{it.id},queries)
+                assertEquals(bound.map{it.id}.toSet(),queries.toSet());assertEquals(bound.size,queries.size)
                 assertTrue(text().contains("尚未签到"))
                 assertTrue(text().contains("结果待核实"))
-                confirmedReply=false
+                confirmedReply.set(false)
                 button("刷新所选账号的签到结果").performClick()
                 await{text().contains("处理结束") && queries.size==4}
+                assertEquals(bound.associate{it.id to 2},queries.groupingBy{it}.eachCount())
                 assertTrue(text().contains("成功 · 已确认签到"))
                 assertFalse(button("确认所选账号并提交").isEnabled)
                 assertEquals(2,sends.size)

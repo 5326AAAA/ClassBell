@@ -67,23 +67,24 @@ class NativeMaterialUiTest {
             views(root).filterIsInstance<CheckBox>().forEach{it.performClick()}
             button("核对所选账号的要求").performClick();await{text().contains("处理结束")}
             if(mode==SignMode.QR) {
-                button("扫描 / 相册识别本次二维码").performClick()
+                button("扫码并立即提交所选账号").performClick()
+                var launch:Intent?=null;await{launch=shadowOf(activity).nextStartedActivity;launch!=null}
                 val request=shadowOf(activity).nextStartedActivityForResult
-                assertEquals(QrScanActivity::class.java.name,shadowOf(activity).nextStartedActivity.component!!.className)
+                assertEquals(QrScanActivity::class.java.name,launch!!.component!!.className)
                 assertEquals(QrScanActivity::class.java.name,request.intent.component!!.className)
                 assertEquals(bound.first().id,request.intent.getStringExtra("boundAccountId"))
                 assertEquals("301",request.intent.getStringExtra("expectedId"))
                 shadowOf(activity).receiveResult(request.intent,Activity.RESULT_OK,Intent().putExtra(QrScanActivity.MATERIAL,raw))
             } else views(root).filterIsInstance<EditText>().single().setText("258")
             preview(root,"多账号-$mode-准备完成")
-            button("确认所选账号并提交").performClick()
-            ShadowAlertDialog.getLatestAlertDialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick()
+            if(mode!=SignMode.QR){button("确认所选账号并提交").performClick()
+                ShadowAlertDialog.getLatestAlertDialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick()}
             await{text().contains("处理结束") && text().split("成功 · 签到成功").size==3}
             assertEquals(bound.map{it.id}.toSet(),sends.toSet());assertEquals(2,sends.size)
             assertNull(shadowOf(activity).nextStartedActivity)
         }finally{controller.pause().stop().destroy();app.prefs.edit().clear().commit()}
     }
-    @Test fun singleAccountQrRoutesFromScannerToConfirmationAndResultWithoutLeavingClassBell() {
+    @Test fun singleAccountDiscoversCourseThenFreshScanImmediatelySubmitsWithoutAConfirmationDialog() {
         app.prefs.edit().clear().commit()
         app.courseMemory.activate(app.prefs,accountKey("single-native-qr-flow"),listOf(course))
         val sign=SignActivity("301","本次扫码用例",course,otherId=2)
@@ -103,8 +104,6 @@ class NativeMaterialUiTest {
         val scan=scanner.setup().get()
         try {
             scan.accept(raw)
-            assertNull(shadowOf(scan).nextStartedActivity)
-            views(scan.window.decorView).filterIsInstance<Button>().single{it.text=="核对课程并继续"}.performClick()
             var intent:Intent?=null
             await { intent=shadowOf(scan).nextStartedActivity;intent!=null }
             assertEquals(SignActionActivity::class.java.name,intent!!.component?.className)
@@ -112,17 +111,17 @@ class NativeMaterialUiTest {
             detail.get().sourceFactory=::source
             val page=detail.setup().get();val root=page.window.decorView
             try {
-                fun button()=views(root).filterIsInstance<Button>().firstOrNull{it.text=="确认二维码并提交"}
-                await { button()?.isEnabled==true }
-                button()!!.performClick()
+                var freshScan:Intent?=null
+                await{freshScan=shadowOf(page).nextStartedActivity;freshScan!=null}
+                assertEquals(QrScanActivity::class.java.name,freshScan!!.component!!.className)
+                val request=shadowOf(page).nextStartedActivityForResult
                 assertEquals(0,submissions.get())
-                ShadowAlertDialog.getLatestAlertDialog().getButton(AlertDialog.BUTTON_NEGATIVE).performClick()
-                assertEquals(0,submissions.get())
-                button()!!.performClick()
-                ShadowAlertDialog.getLatestAlertDialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick()
+                val recognizedAt=System.nanoTime()
+                shadowOf(page).receiveResult(request.intent,Activity.RESULT_OK,Intent().putExtra(QrScanActivity.MATERIAL,raw))
                 await { views(root).filterIsInstance<TextView>().any{it.text=="测试服务端已确认"} }
+                assertTrue("Scan to fixture result must fit five seconds",System.nanoTime()-recognizedAt<5_000_000_000L)
                 assertEquals(1,submissions.get())
-                assertNull(button())
+                assertFalse(views(root).filterIsInstance<Button>().any{it.text=="确认二维码并提交"})
                 assertNull(shadowOf(page).nextStartedActivity)
             } finally { detail.pause().stop().destroy() }
         } finally { scanner.pause().stop().destroy();app.prefs.edit().clear().commit() }
@@ -142,7 +141,7 @@ class NativeMaterialUiTest {
             assertTrue(activity.isFinishing);assertEquals(Activity.RESULT_CANCELED,shadowOf(activity).resultCode)
         }finally{controller.pause().stop().destroy();app.prefs.edit().clear().commit()}
     }
-    @Test fun stopCancelsThreeParallelRequestsAndDoesNotStartQueuedAccounts() {
+    @Test fun stopCancelsAllSelectedParallelRequestsBeforeTheirFinalCommit() {
         app.prefs.edit().clear().commit()
         var json:String?=null;val accounts=BoundAccounts({json},{json=it})
         repeat(5){i->accounts.bind("合成账号 $i",listOf(Cookie.Builder().name("_uid").value("90$i").domain("chaoxing.com").path("/").secure().build()),listOf(course))}
@@ -168,13 +167,13 @@ class NativeMaterialUiTest {
         try {
             views(root).filterIsInstance<CheckBox>().forEach{it.performClick()}
             button("核对所选账号的要求").performClick();await{text().contains("处理结束")}
-            button("扫描 / 相册识别本次二维码").performClick()
+            button("扫码并立即提交所选账号").performClick()
+                var launch:Intent?=null;await{launch=shadowOf(activity).nextStartedActivity;launch!=null}
             val request=shadowOf(activity).nextStartedActivityForResult
             shadowOf(activity).receiveResult(request.intent,Activity.RESULT_OK,Intent().putExtra(QrScanActivity.MATERIAL,raw))
-            button("确认所选账号并提交").performClick();ShadowAlertDialog.getLatestAlertDialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick()
-            await{entered.size==3}
-            button("停止后续账号").performClick();await{finished.get()==3}
-            assertEquals(3,entered.size);assertEquals(0,sent.get());assertTrue(text().contains("已停止后续处理"))
+            await{entered.size==5}
+            button("停止后续账号").performClick();await{finished.get()==5}
+            assertEquals(5,entered.size);assertEquals(0,sent.get());assertTrue(text().contains("已停止后续处理"))
         }finally{gate.countDown();controller.pause().stop().destroy();app.prefs.edit().clear().commit()}
     }
 }

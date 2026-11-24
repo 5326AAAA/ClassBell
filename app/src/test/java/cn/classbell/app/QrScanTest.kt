@@ -50,6 +50,7 @@ class QrScanTest {
         shadowOf(app.packageManager).setShouldShowRequestPermissionRationale(Manifest.permission.CAMERA,false)
         shadowOf(app.packageManager).setSystemFeature(PackageManager.FEATURE_CAMERA_FLASH,false)
     }
+    private fun materialPage()=Intent(app,QrScanActivity::class.java).putExtra("expectedId","1700000000000")
     private fun scanner(root:View)=views(root).filterIsInstance<BarcodeView>().single()
     private fun fakeCamera(root:View)=Shadow.extract<FakeBarcodeView>(scanner(root))
     private fun decoded(raw:String)=BarcodeResult(Result(raw,null,emptyArray(),BarcodeFormat.QR_CODE),null)
@@ -75,25 +76,25 @@ class QrScanTest {
         val bitmap=Bitmap.createBitmap(390,844,Bitmap.Config.ARGB_8888);val canvas=Canvas(bitmap);canvas.drawColor(ModernUi.background);root.draw(canvas)
         File(folder,"$name.png").outputStream().use{bitmap.compress(Bitmap.CompressFormat.PNG,100,it)};bitmap.recycle()
     }
-    @Test fun encodedSyntheticImageDecodesLocallyWithoutSubmittingOrOpeningOfficialPage() {
+    @Test fun encodedSyntheticImageDecodesLocallyAndReturnsFreshMaterialWithoutAConfirmationPage() {
         setup();val bits=QRCodeWriter().encode(text,BarcodeFormat.QR_CODE,600,600)
         val bitmap=Bitmap.createBitmap(600,600,Bitmap.Config.ARGB_8888)
         for(y in 0 until 600)for(x in 0 until 600)bitmap.setPixel(x,y,if(bits[x,y])android.graphics.Color.BLACK else android.graphics.Color.WHITE)
         val decoded=try{QrImage.decode(bitmap)}finally{bitmap.recycle()};assertEquals(text,decoded)
-        val controller=Robolectric.buildActivity(QrScanActivity::class.java).setup();val activity=controller.get();val root=activity.window.decorView
+        val controller=Robolectric.buildActivity(QrScanActivity::class.java,materialPage()).setup();val activity=controller.get();val root=activity.window.decorView
         try {
-            activity.accept(decoded);assertNull(shadowOf(activity).nextStartedActivity)
-            preview(root,"扫码-识别后等待确认")
-            assertFalse(views(root).filterIsInstance<TextView>().any{it.text.contains("0123456789abcdef")})
-            assertTrue(views(root).filterIsInstance<Button>().any{it.text=="核对课程并继续"})
-            assertFalse(views(root).filterIsInstance<Button>().any{it.text=="尝试查看官方页面"})
             activity.accept("https://example.org/not-a-sign")
+            assertFalse(activity.isFinishing)
             assertTrue(views(root).filterIsInstance<TextView>().any{it.text.startsWith("未识别为支持")})
-            assertFalse(views(root).filterIsInstance<Button>().any{it.text=="尝试查看官方页面"})
             button(root,"从相册识别二维码").performClick()
-            val request=shadowOf(activity).nextStartedActivityForResult
-            assertEquals(Intent.ACTION_OPEN_DOCUMENT,request.intent.action);assertEquals("image/*",request.intent.type)
-            assertEquals(QrScanActivity.IMAGE,request.requestCode)
+            val picker=shadowOf(activity).nextStartedActivityForResult
+            assertEquals(Intent.ACTION_OPEN_DOCUMENT,picker.intent.action)
+            activity.accept(decoded)
+            assertTrue(activity.isFinishing)
+            assertEquals(android.app.Activity.RESULT_OK,shadowOf(activity).resultCode)
+            assertEquals(text,shadowOf(activity).resultIntent.getStringExtra(QrScanActivity.MATERIAL))
+            assertTrue(shadowOf(activity).resultIntent.hasExtra(QrScanActivity.CAPTURED_AT))
+            assertFalse(views(root).filterIsInstance<TextView>().any{it.text.contains("0123456789abcdef")})
         }finally{controller.pause().stop().destroy();app.prefs.edit().clear().commit()}
     }
     @Test fun galleryOpensACropPreviewBeforeRecognitionAndReturnsOnlyStatusInTestMode() {
@@ -128,13 +129,12 @@ class QrScanTest {
         }finally{image.recycle();controller.pause().stop().destroy();host.pause().stop().destroy();app.prefs.edit().clear().commit()}
     }
     @Test fun accountChangeClosesTheScannerAndDiscardedResultsCannotOpenAPage() {
-        setup();val controller=Robolectric.buildActivity(QrScanActivity::class.java).setup();val activity=controller.get()
+        setup();val controller=Robolectric.buildActivity(QrScanActivity::class.java,materialPage()).setup();val activity=controller.get()
         try {
-            activity.accept(text)
             app.prefs.edit().putString("identity",accountKey("other-qr-fixture")).commit();app.notifyUi();shadowOf(Looper.getMainLooper()).idle()
             assertTrue(activity.isFinishing)
             activity.accept(text)
-            button(activity.window.decorView,"核对课程并继续").performClick()
+            assertNull(shadowOf(activity).resultIntent)
             assertNull(shadowOf(activity).nextStartedActivity)
         }finally{controller.pause().stop().destroy();app.prefs.edit().clear().commit()}
     }
@@ -153,7 +153,7 @@ class QrScanTest {
     }
     @Test @Config(shadows=[FakeCameraPreview::class,FakeBarcodeView::class])
     fun cameraPermissionDenialExplainsAlternativesWithoutStartingCameraOrSettings() {
-        setup();val controller=Robolectric.buildActivity(QrScanActivity::class.java).setup();val activity=controller.get();val root=activity.window.decorView
+        setup();val controller=Robolectric.buildActivity(QrScanActivity::class.java,materialPage()).setup();val activity=controller.get();val root=activity.window.decorView
         try {
             val camera=fakeCamera(root)
             assertEquals(0,camera.resumeCount)
@@ -171,7 +171,7 @@ class QrScanTest {
     }
     @Test @Config(shadows=[FakeCameraPreview::class,FakeBarcodeView::class])
     fun permanentDenialOpensOnlyThisAppsSettingsAfterAnExplicitClickAndThenResumes() {
-        setup();val controller=Robolectric.buildActivity(QrScanActivity::class.java).setup();val activity=controller.get();val root=activity.window.decorView
+        setup();val controller=Robolectric.buildActivity(QrScanActivity::class.java,materialPage()).setup();val activity=controller.get();val root=activity.window.decorView
         try {
             button(root,"兼容扫码（ZXing）").performClick();denyCamera(activity,permanent=true)
             val settings=button(root,"打开应用设置")
@@ -188,7 +188,7 @@ class QrScanTest {
     }
     @Test @Config(shadows=[FakeCameraPreview::class,FakeBarcodeView::class])
     fun grantingPermissionWithoutACameraRequestDoesNotStartScanningOnResume() {
-        setup();val controller=Robolectric.buildActivity(QrScanActivity::class.java).setup();val activity=controller.get();val root=activity.window.decorView
+        setup();val controller=Robolectric.buildActivity(QrScanActivity::class.java,materialPage()).setup();val activity=controller.get();val root=activity.window.decorView
         try {
             controller.pause();shadowOf(app).grantPermissions(Manifest.permission.CAMERA);controller.resume()
             activity.onRequestPermissionsResult(QrScanActivity.CAMERA,arrayOf(Manifest.permission.CAMERA),intArrayOf(PackageManager.PERMISSION_GRANTED))
@@ -199,7 +199,7 @@ class QrScanTest {
     }
     @Test @Config(shadows=[FakeCameraPreview::class,FakeBarcodeView::class])
     fun choosingAnImageCancelsPermissionIntentAndLatePermissionResultsCannotRestartCamera() {
-        setup();val controller=Robolectric.buildActivity(QrScanActivity::class.java).setup();val activity=controller.get();val root=activity.window.decorView
+        setup();val controller=Robolectric.buildActivity(QrScanActivity::class.java,materialPage()).setup();val activity=controller.get();val root=activity.window.decorView
         try {
             button(root,"兼容扫码（ZXing）").performClick();denyCamera(activity,permanent=true)
             button(root,"从相册识别二维码").performClick()
@@ -252,7 +252,7 @@ class QrScanTest {
     fun torchIsAvailableOnlyDuringPreviewAndIsResetOnPauseAndSuccessfulDecode() {
         setup();shadowOf(app.packageManager).setSystemFeature(PackageManager.FEATURE_CAMERA_FLASH,true)
         shadowOf(app).grantPermissions(Manifest.permission.CAMERA)
-        val controller=Robolectric.buildActivity(QrScanActivity::class.java).setup();val activity=controller.get();val root=activity.window.decorView
+        val controller=Robolectric.buildActivity(QrScanActivity::class.java,materialPage()).setup();val activity=controller.get();val root=activity.window.decorView
         try {
             val torch=button(root,"打开手电筒");assertEquals(View.VISIBLE,torch.visibility);assertFalse(torch.isEnabled)
             button(root,"兼容扫码（ZXing）").performClick();val camera=fakeCamera(root)
@@ -266,7 +266,7 @@ class QrScanTest {
     @Test @Config(shadows=[FakeCameraPreview::class,FakeBarcodeView::class])
     fun unsupportedTorchStaysHiddenAndLateCameraErrorsAfterDestroyDoNotChangeViews() {
         setup();shadowOf(app).grantPermissions(Manifest.permission.CAMERA)
-        val controller=Robolectric.buildActivity(QrScanActivity::class.java).setup();val activity=controller.get();val root=activity.window.decorView
+        val controller=Robolectric.buildActivity(QrScanActivity::class.java,materialPage()).setup();val activity=controller.get();val root=activity.window.decorView
         try {
             val torch=button(root,"打开手电筒");assertEquals(View.GONE,torch.visibility);assertFalse(torch.isEnabled)
             button(root,"兼容扫码（ZXing）").performClick();val camera=fakeCamera(root)
@@ -280,10 +280,10 @@ class QrScanTest {
     @Test @Config(shadows=[FakeCameraPreview::class,FakeBarcodeView::class])
     fun recreationDropsDecodedMaterialAndCameraIntentWithoutPersistingRawQrOrSecret() {
         setup();shadowOf(app).grantPermissions(Manifest.permission.CAMERA)
-        val controller=Robolectric.buildActivity(QrScanActivity::class.java).setup();val activity=controller.get()
+        val controller=Robolectric.buildActivity(QrScanActivity::class.java,materialPage()).setup();val activity=controller.get()
         val saved=Bundle()
         try {
-            activity.accept(text);assertTrue(views(activity.window.decorView).filterIsInstance<Button>().any{it.text=="核对课程并继续"})
+            activity.accept(text);assertTrue(activity.isFinishing)
             controller.pause().saveInstanceState(saved).stop().destroy()
             val bytes=savedBytes(saved)
             assertFalse(contains(bytes,text));assertFalse(contains(bytes,"0123456789abcdef0123456789abcdef"));assertFalse(saved.containsKey(QrScanActivity.MATERIAL))
@@ -300,7 +300,7 @@ class QrScanTest {
     @Test @Config(shadows=[FakeCameraPreview::class,FakeBarcodeView::class])
     fun recreationNeverRestoresAnActiveCameraRequest() {
         setup();shadowOf(app).grantPermissions(Manifest.permission.CAMERA)
-        val controller=Robolectric.buildActivity(QrScanActivity::class.java).setup();val activity=controller.get();val saved=Bundle()
+        val controller=Robolectric.buildActivity(QrScanActivity::class.java,materialPage()).setup();val activity=controller.get();val saved=Bundle()
         try {
             button(activity.window.decorView,"兼容扫码（ZXing）").performClick();assertEquals(1,fakeCamera(activity.window.decorView).resumeCount)
             controller.pause().saveInstanceState(saved).stop().destroy()
@@ -313,7 +313,7 @@ class QrScanTest {
     }
     @Test fun liveScannerIsLocalAndRejectsOldOrForeignResults() {
         setup();shadowOf(app).grantPermissions(Manifest.permission.CAMERA)
-        val controller=Robolectric.buildActivity(QrScanActivity::class.java).setup()
+        val controller=Robolectric.buildActivity(QrScanActivity::class.java,materialPage()).setup()
         val activity=controller.get();val root=activity.window.decorView
         val live=FakeLivePreview(activity)
         activity.livePreviewFactory={live}
@@ -322,20 +322,20 @@ class QrScanTest {
             button(root,"摄像头扫码").performClick()
             val first=live.sessions.single()
             first.code("https://example.org/foreign")
-            assertTrue(views(root).filterIsInstance<Button>().none{it.text=="核对课程并继续"})
+            assertFalse(activity.isFinishing)
             controller.pause();first.code(text);controller.resume()
             assertEquals(2,live.sessions.size)
             first.failed();first.code(text)
-            assertTrue(views(root).filterIsInstance<Button>().none{it.text=="核对课程并继续"})
+            assertFalse(activity.isFinishing)
             val second=live.sessions.last();second.ready(true)
             val torch=button(root,"打开手电筒");assertTrue(torch.isEnabled)
             torch.performClick();assertEquals(listOf(true),live.torch)
             live.torchFailure?.invoke();assertEquals("打开手电筒",torch.text)
             second.code(text)
             assertFalse(torch.isEnabled)
-            assertTrue(views(root).filterIsInstance<Button>().any{it.text=="核对课程并继续"})
+            assertTrue(activity.isFinishing)
             assertNull(shadowOf(activity).nextStartedActivity)
-            assertNull(shadowOf(activity).resultIntent)
+            assertNotNull(shadowOf(activity).resultIntent)
         } finally {
             controller.pause().stop().destroy();app.prefs.edit().clear().commit()
         }
@@ -345,7 +345,7 @@ class QrScanTest {
     @Test @Config(shadows=[FakeCameraPreview::class,FakeBarcodeView::class])
     fun failedLiveScannerLeavesCompatibilityModeAvailableWithoutOpeningAnotherApp() {
         setup();shadowOf(app).grantPermissions(Manifest.permission.CAMERA)
-        val controller=Robolectric.buildActivity(QrScanActivity::class.java).setup()
+        val controller=Robolectric.buildActivity(QrScanActivity::class.java,materialPage()).setup()
         val activity=controller.get();val root=activity.window.decorView
         val live=FakeLivePreview(activity);activity.livePreviewFactory={live}
         try {
@@ -355,16 +355,16 @@ class QrScanTest {
             assertNull(shadowOf(activity).nextStartedActivity)
             button(root,"兼容扫码（ZXing）").performClick()
             failed.code(text)
-            assertTrue(views(root).filterIsInstance<Button>().none{it.text=="核对课程并继续"})
+            assertFalse(activity.isFinishing)
             fakeCamera(root).callbacks.single().barcodeResult(decoded(text))
-            assertTrue(views(root).filterIsInstance<Button>().any{it.text=="核对课程并继续"})
+            assertTrue(activity.isFinishing)
             assertNull(shadowOf(activity).nextStartedActivity)
         } finally {controller.pause().stop().destroy();app.prefs.edit().clear().commit()}
     }
 
     @Test fun stopScanHidesTheViewfinderAndDoesNotRestartOnResumeOrAcceptAnOldFrame() {
         setup();shadowOf(app).grantPermissions(Manifest.permission.CAMERA)
-        val controller=Robolectric.buildActivity(QrScanActivity::class.java).setup()
+        val controller=Robolectric.buildActivity(QrScanActivity::class.java,materialPage()).setup()
         val activity=controller.get();val root=activity.window.decorView
         val live=FakeLivePreview(activity);activity.livePreviewFactory={live}
         try {

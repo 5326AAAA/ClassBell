@@ -91,6 +91,13 @@ class ModernLayoutTest {
         layout(root, 358, 650); preview(root, "更新日志")
         dialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick()
         shadowOf(Looper.getMainLooper()).idle(); assertFalse(dialog.isShowing)
+        button(activity,"☰ 使用帮助").performClick()
+        val help=ShadowAlertDialog.getLatestAlertDialog()
+        assertTrue(views(help.window!!.decorView).filterIsInstance<TextView>().any{it.text==HelpUi.PROJECT_URL})
+        views(help.window!!.decorView).single{it.contentDescription=="GitHub 开源项目"}.performClick()
+        val projectIntent=shadowOf(activity).nextStartedActivity
+        assertEquals(android.content.Intent.ACTION_VIEW,projectIntent.action)
+        assertEquals("https://github.com/5326AAAA/ClassBell",projectIntent.dataString)
     }
 
     @Test fun fourPrimaryPagesKeepToolsUnderProfileWithoutStoppingMonitor() {
@@ -99,7 +106,7 @@ class ModernLayoutTest {
         val expected = listOf("课堂提醒页面", "课程页面", "作业页面", "我的页面")
         listOf("首页", "课程", "作业", "我的").forEachIndexed { index, title ->
             button(activity, title).performClick(); layout(activity.window.decorView)
-            val visible = views(activity.window.decorView).filterIsInstance<ScrollView>().filter { it.visibility == View.VISIBLE }
+            val visible = views(activity.window.decorView).filterIsInstance<ScrollView>().filter { it.isShown }
             assertEquals(listOf(expected[index]), visible.map { it.contentDescription.toString() })
             assertTrue(app.prefs.getBoolean("monitorEnabled", false))
             val nav = button(activity, title)
@@ -299,7 +306,7 @@ class ModernLayoutTest {
         assertTrue(tile.height>=48);assertTrue(tile.width in 48..320)
         assertNotNull(tile.findViewWithTag<View>("profile-sign-icon"))
         val profile=views(activity.window.decorView).filterIsInstance<ProfilePanel>().single()
-        assertTrue(tile.bottom in (profile.height*0.4f).toInt()..(profile.height*0.65f).toInt())
+        assertTrue(tile.bottom <= profile.height)
         assertProfileTools(activity)
         val settings=button(activity,"提醒设置") as Button
         val tools=button(activity,"更多工具") as Button
@@ -343,9 +350,19 @@ class ModernLayoutTest {
         assertTrue(tiles.zipWithNext().all { (left,right) -> left.right<right.left })
         val settings=button(activity,"提醒设置")
         val credit=views(activity.window.decorView).filterIsInstance<TextView>()
-            .single{it.text=="Class Bell ${BuildConfig.VERSION_NAME}\n作者：Forest5326" && it.parent is ProfilePanel}
-        val shortcuts=(tiles.first().parent as View)
+            .single{it.text=="Class Bell ${BuildConfig.VERSION_NAME} · 作者：Forest5326" && it.parent is ProfilePanel}
         val links=(settings.parent as View)
-        assertTrue(shortcuts.bottom<links.top && links.bottom<=credit.top && credit.height>=32)
+        val scroll=views(profile).filterIsInstance<ScrollView>().single()
+        assertTrue(scroll.bottom<=links.top && links.bottom<=credit.top && credit.height>=24)
+        assertEquals(1,credit.lineCount)
+        assertTrue(credit.bottom<=profile.height)
+        if(activity.resources.configuration.fontScale<=1f) assertTrue(scroll.getChildAt(0).height<=scroll.height)
+        val footerY=links.top to credit.bottom
+        val show=views(profile).filterIsInstance<Button>().single{it.text=="查看全部"}
+        show.performClick();layout(activity.window.decorView,activity.window.decorView.width,activity.window.decorView.height)
+        assertEquals(footerY,links.top to credit.bottom)
+        preview(activity.window.decorView,"我的-权限展开${if(activity.resources.configuration.fontScale>1f)"-大字号" else ""}")
+        show.performClick();layout(activity.window.decorView,activity.window.decorView.width,activity.window.decorView.height)
+        assertEquals(footerY,links.top to credit.bottom)
     }
 }

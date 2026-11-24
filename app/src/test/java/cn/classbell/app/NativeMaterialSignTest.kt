@@ -135,7 +135,7 @@ class NativeMaterialSignTest {
         val plan=SignProtocol.detail(root.toString(),item,allowQr=true)
         assertEquals(SignMode.OFFICIAL,plan.mode)
         for(label in listOf("验证码","人脸核验","微信身份校验","防作弊校验"))assertTrue(plan.message.contains(label))
-        assertTrue(plan.requirements.lines.any{it.contains("二维码自动更新：已开启")})
+        assertTrue(plan.requirements.lines.any{it.contains("二维码动态更新")})
         assertFalse(plan.requirements.lines.any{it.contains("5 秒")})
     }
     @Test fun responseDiagnosticsKeepSchemaAndErrorCodeButNeverGenericAuthorizationCode() {

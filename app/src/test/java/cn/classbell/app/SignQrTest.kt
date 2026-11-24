@@ -2,7 +2,12 @@ package cn.classbell.app
 
 import org.junit.Assert.*
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk=[35],application=BellApp::class)
 class SignQrTest {
     private val sample="https://mobilelearn.chaoxing.com/widget/sign/e?id=1700000000000&c=123456&enc=0123456789abcdef0123456789abcdef&DB_STRATEGY=PRIMARY_KEY&STRATEGY_PARA=id"
     @Test fun widgetRecordAndCodeMayDifferAndThePayloadIsNotRenderedAsText() {

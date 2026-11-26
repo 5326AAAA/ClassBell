@@ -66,8 +66,8 @@ android {
         applicationId = "cn.classbell.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 47
-        versionName = "1.3.3"
+        versionCode = 52
+        versionName = "1.5.2"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     compileOptions {

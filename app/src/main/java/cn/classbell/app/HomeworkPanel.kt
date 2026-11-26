@@ -80,8 +80,12 @@ class HomeworkPanel(
         updated = text("", 12, ModernUi.muted); header.addView(updated)
         refresh = button("一键更新作业", true) { refresh() }; header.addView(refresh)
         cancel = button("取消作业更新") { cancelRefresh() }; header.addView(cancel)
-        header.addView(button("打开学习通查看作业") { open(HomeworkParser.WEB_URL) })
         courseChoice=button("选择作业课程") { chooseCourses() };header.addView(courseChoice)
+        header.addView(button("作业截止日历") {
+            activity.startActivity(Intent(activity,HomeworkCalendarActivity::class.java).apply{
+                fixedCourses?.let{putStringArrayListExtra("courses",ArrayList(it))}
+            })
+        })
         header.addView(text("使用 App 当前账号直接读取，不依赖手机浏览器；仅手动刷新，不后台轮询。", 12, ModernUi.muted))
         val strip = HorizontalScrollView(activity).apply { isHorizontalScrollBarEnabled = false }
         val row = LinearLayout(activity)
@@ -199,6 +203,7 @@ class HomeworkPanel(
         if (snapshot == null || selected.isEmpty()) records.addView(text(
             if (snapshot == null) "刷新后会在这里显示作业。" else "上次读取的记录中没有“$filter”作业。", 14, ModernUi.muted))
         for (item in selected.take(limit)) {
+            val renderedOwner=identity
             val card = panel(records)
             val urgent=!item.peerReview && state(item)==HomeworkState.PENDING && item.dueAt!=null && item.dueAt>now && item.dueAt-now<=86_400_000L
             if(urgent) {
@@ -206,7 +211,15 @@ class HomeworkPanel(
                 card.contentDescription="24 小时内截止的待交作业"
                 card.addView(text("即将截止 · 24 小时内",12,ModernUi.danger,true))
             }
-            card.addView(text(item.title, 17, ModernUi.ink, true))
+            val titleRow=LinearLayout(activity).apply{orientation=HORIZONTAL;gravity=Gravity.TOP}
+            titleRow.addView(text(item.title,17,ModernUi.ink,true),LayoutParams(0,-2,1f))
+            titleRow.addView(button("设置完成状态") {
+                if(renderedOwner==app.prefs.getString("identity","") && app.prefs.getBoolean("loggedIn",false))chooseProgress(item) else syncSession()
+            }.apply {
+                textSize=12f;setPadding(dp(10),dp(6),dp(10),dp(6))
+                layoutParams=LayoutParams(-2,dp(48)).apply{marginStart=dp(8)}
+            })
+            card.addView(titleRow,LayoutParams(-1,-2))
             card.addView(text(item.courseName, 13, ModernUi.muted))
             if(item.key in snapshot?.retainedKeys.orEmpty())card.addView(text("上次记录 · 本次未核实状态",12,ModernUi.danger,true))
             val state = state(item)
@@ -224,9 +237,11 @@ class HomeworkPanel(
                 if (state == HomeworkState.EXPIRED) ModernUi.danger else ModernUi.primary))
             item.deadlineText()?.let{card.addView(text(it,12,ModernUi.muted))}
             card.addView(text(if(manual==HomeworkMark.COMPLETE)"已手动标记完成，可随时重新标为未完成。" else if(manual==HomeworkMark.INCOMPLETE)"已手动标记未完成，学习通的原始提交状态保留。" else item.remaining(now), 14, if(urgent)ModernUi.danger else ModernUi.ink,urgent))
-            card.addView(button(if(item.state(now)==HomeworkState.SUBMITTED)"查看已交作业" else "查看 / 提交作业",true) {OfficialPageActivity.open(activity,item.url,item.title)})
-            card.addView(button("设置完成状态") { chooseProgress(item) })
-            card.addView(button("在学习通打开") { open(item.url) })
+            if(!item.activityTask && !item.peerReview)card.addView(button("题目文字与图片",true){
+                if(renderedOwner!=app.prefs.getString("identity","") || !app.prefs.getBoolean("loggedIn",false)){syncSession();return@button}
+                activity.startActivity(HomeworkExportActivity.intent(activity,item,renderedOwner))
+            })
+            card.addView(button(if(item.state(now)==HomeworkState.SUBMITTED)"查看已交作业" else "查看 / 提交作业") {OfficialPageActivity.open(activity,item.url,item.title)})
         }
         if (selected.size > limit) records.addView(button("加载更多（还有 ${selected.size - limit} 项）") { limit += 30; render() })
     }

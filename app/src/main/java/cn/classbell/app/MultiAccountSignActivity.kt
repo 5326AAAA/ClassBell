@@ -14,7 +14,7 @@ import java.io.File
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
 
-/** One activity, isolated account snapshots, bounded QR concurrency and a result for every account. */
+/** One activity, isolated account snapshots, bounded submissions and a result for every account. */
 class MultiAccountSignActivity:Activity() {
     private val app get()=application as BellApp
     internal var accountRepository:BoundAccounts?=null
@@ -81,6 +81,7 @@ class MultiAccountSignActivity:Activity() {
         val intro=StudyUi.card(this,body)
         intro.addView(StudyUi.text(this,item.course.name,20,true));intro.addView(StudyUi.text(this,item.title))
         intro.addView(StudyUi.text(this,"选择账号后，可以核对签到要求或刷新各账号的结果。",13))
+        if(plans.values.any{it.mode==SignMode.PHOTO})intro.addView(StudyUi.text(this,"拍照签到：为每个账号分别选图并预览，确认后最多 $PHOTO_PARALLELISM 个账号并行上传；结果分别显示。",12))
         val selectedCount=StudyUi.text(this,"已选 ${selected.size} 个账号",13,true)
         intro.addView(selectedCount)
         val checkButton=StudyUi.button(this,"核对所选账号的要求",true){check()}
@@ -94,7 +95,7 @@ class MultiAccountSignActivity:Activity() {
                 selected.any{plans[it]?.mode != SignMode.OFFICIAL && !locked(it)}
         }
         updateActions()
-        if(busy)intro.addView(StudyUi.button(this,"停止后续账号"){cancel();state.text="已停止后续处理。已发出的提交请查看记录并核对。";render()})
+        if(busy)intro.addView(StudyUi.button(this,"停止本次处理"){cancel();state.text="已停止后续处理。已发出的提交请查看记录并核对。";render()})
         for(account in accounts) {
             val row=StudyUi.card(this,body)
             row.addView(CheckBox(this).apply {
@@ -131,7 +132,7 @@ class MultiAccountSignActivity:Activity() {
                     if(!busy){picking=account.id;try {
                         SignPhoto.openPicker(this,PHOTO)
                     }catch(e:Exception){DiagnosticLog.error("BatchPhotoPicker",e);state.text="无法打开图片选择器。"}}
-                }.apply{isEnabled=!busy})
+                }.apply{isEnabled=!busy && !locked(account.id)})
                 if(photos[account.id]?.isFile==true)row.addView(StudyUi.button(this,"移除 ${account.label} 的本次照片"){
                     if(!busy){photos.remove(account.id)?.delete();previews.remove(account.id)?.recycle();state.text="本次照片已移除，未上传。";render()}
                 }.apply{isEnabled=!busy})
@@ -215,7 +216,7 @@ class MultiAccountSignActivity:Activity() {
             .setView(confirmationPanel(choices))
             .setNegativeButton("取消",null).setPositiveButton("提交所选账号一次"){_,_->
                 choices.forEach{(account,reason)->if(reason!=null)notes[account.id]=reason}
-                runAccounts(ready,"正在提交所选账号…",Step.SUBMIT,parallel=ready.all{selectedModes[it.id]==SignMode.QR}) {account,api,check->
+                runAccounts(ready,"正在提交所选账号…",Step.SUBMIT,parallel=ready.all{selectedModes[it.id] in setOf(SignMode.QR,SignMode.PHOTO)}) {account,api,check->
                     val outcome=SignSubmission(ledger).submit(account.id,item,api,
                         SignInputs(code=selectedCode,photo=selectedPhotos[account.id],fix=selectedFix,expectedMode=selectedModes[account.id],qr=selectedQr,gesture=selectedGesture),check)
                     StepResult(outcome=outcome)
@@ -235,6 +236,10 @@ class MultiAccountSignActivity:Activity() {
                 val row=StudyUi.card(activity,content).apply{background=ModernUi.shape(activity,ModernUi.background,14)}
                 row.addView(StudyUi.text(activity,account.label,15,true))
                 row.addView(StudyUi.text(activity,reason ?: "仅提交一次",12))
+                if(reason==null && plans[account.id]?.mode==SignMode.PHOTO) {
+                    previews[account.id]?.let{bitmap->row.addView(ImageView(activity).apply{setImageBitmap(bitmap);scaleType=ImageView.ScaleType.FIT_CENTER;contentDescription="${account.label} 的待提交照片"},LinearLayout.LayoutParams(-1,ModernUi.dp(activity,120)))}
+                    row.addView(StudyUi.text(activity,"仅上传此账号对应的照片；不会复用其他账号的图片。",12))
+                }
             }
         }
         section("将提交",choices.filterValues{it==null},ModernUi.strongPrimary)
@@ -267,16 +272,24 @@ class MultiAccountSignActivity:Activity() {
                         val id=account.id
                         result.plan?.let{plans[id]=it}
                         result.outcome?.let{outcome->
-                            if(step==Step.SUBMIT){submitResults[id]=outcome;queryResults.remove(id)}
+                            if(step==Step.SUBMIT){
+                                submitResults[id]=outcome;queryResults.remove(id)
+                                if(plans[id]?.mode==SignMode.PHOTO){photos.remove(id)?.delete();previews.remove(id)?.recycle()}
+                            }
                             if(step==Step.QUERY) {
                                 queryResults[id]=outcome
                                 if(id !in confirmed && submitResults[id]?.successful!=true && ledger.recoverUnsubmittedQr(id,item.copy(otherId=if(plans[id]?.mode==SignMode.QR)2 else item.otherId),outcome))submitResults.remove(id)
+                                if(id !in confirmed && submitResults[id]?.successful!=true && locked(id) && plans[id]?.mode==SignMode.PHOTO &&
+                                    ledger.recoverUnsubmittedPhoto(id,item.copy(otherId=0),outcome)) {
+                                    submitResults.remove(id)
+                                    photos.remove(id)?.delete();previews.remove(id)?.recycle()
+                                }
                             }
                             if(outcome.successful)confirmed[id]=outcome
                         }
                         if(result.message!=null)notes[id]=result.message else notes.remove(id)
                         state.text="已处理 $count / ${chosen.size}"
-                        if(!parallel)render()
+                        if(!parallel || (step==Step.SUBMIT && plans[id]?.mode==SignMode.PHOTO))render()
                     }
                 }
             }
@@ -284,7 +297,8 @@ class MultiAccountSignActivity:Activity() {
             val pending=mutableListOf<Future<*>>()
             try {
                 if(parallel && chosen.size>1) {
-                    pool=Executors.newFixedThreadPool(minOf(10,chosen.size))
+                    val limit=if(step==Step.SUBMIT && chosen.any{plans[it.id]?.mode==SignMode.PHOTO})PHOTO_PARALLELISM else 10
+                    pool=Executors.newFixedThreadPool(minOf(limit,chosen.size))
                     chosen.forEachIndexed{index,account->pending+=pool!!.submit{runOne(account,index)}}
                     pending.forEach{it.get()}
                 } else chosen.forEachIndexed{index,account->runOne(account,index)}
@@ -385,6 +399,7 @@ class MultiAccountSignActivity:Activity() {
     override fun onPause(){foreground=false;super.onPause()}
     override fun onDestroy(){closed=true;cancel();dialog?.dismiss();if(::location.isInitialized)location.cancel();worker.shutdownNow();photos.values.forEach{it.delete()};photos.clear();previews.values.forEach{it.recycle()};previews.clear();super.onDestroy()}
     companion object {
+        internal const val PHOTO_PARALLELISM=4
         private const val PHOTO=5801;private const val LOCATION=5802;private const val QR=5803
         fun intent(activity:Activity,item:SignActivity)=Intent(activity,MultiAccountSignActivity::class.java)
             .putExtra("courseKey",item.course.key).putExtra("activeId",item.id).putExtra("title",item.title).putExtra("otherId",item.otherId ?: -1)

@@ -23,6 +23,7 @@ object HelpUi {
         for((title,detail,action) in listOf(
             Triple("GitHub 开源项目",PROJECT_URL,{openProject(activity)}),
             Triple("使用指南","权限、选课、作业与签到操作",guide),
+            Triple("检查更新","查看 GitHub 正式版与安装包",{activity.startActivity(Intent(activity,UpdateActivity::class.java))}),
             Triple("常见问题处理方法","不响铃、登录和后台运行",questions),
             Triple("更新日志","看看这一版改了什么",changes))) {
             val project=title=="GitHub 开源项目"

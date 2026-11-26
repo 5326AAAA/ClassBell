@@ -241,6 +241,11 @@ class SigningApi(private val snapshot: List<Cookie>, private val guard: () -> Un
         AccountAccess.check(name)
         val fid = snapshot.firstOrNull { it.name == "fid" }?.value.orEmpty().ifBlank { user.optString("fid") }
         if (name.isBlank() || !SignProtocol.validId(fid)) throw ApiProblem("无法确认本人身份或学校，请使用学习通。")
+        // Normal official page preparation only. Never solve a captcha or synthesize verification credentials.
+        val page = get("https://mobilelearn.chaoxing.com/newsign/preSign", mapOf("activePrimaryId" to activity.id,
+            "courseId" to activity.course.id, "classId" to activity.course.classId, "uid" to uid, "general" to "1", "sys" to "1", "ls" to "1", "appType" to "15", "ut" to "s"))
+        if (page.contains("用户登录") || page.contains("passport2.chaoxing.com/login")) throw LoginRequired()
+        if (listOf("请先完成验证", "请完成安全验证", "请进行人脸识别").any(page::contains)) throw ApiProblem("需要官方验证，未提交签到。")
         var objectId: String? = null
         if (photo != null) {
             if (!photo.isFile || photo.length() !in 1..4L*1024*1024) throw ApiProblem("照片不可用，请重新选图。")
@@ -258,11 +263,6 @@ class SigningApi(private val snapshot: List<Cookie>, private val guard: () -> Un
             DiagnosticLog.event("SignPhoto", "${DiagnosticLog.activity(activity)} upload_confirmed=true")
             revalidate() // The activity may have ended while the user was uploading.
         }
-        // Normal official page preparation only. Never solve a captcha or synthesize verification credentials.
-        val page = get("https://mobilelearn.chaoxing.com/newsign/preSign", mapOf("activePrimaryId" to activity.id,
-            "courseId" to activity.course.id, "classId" to activity.course.classId, "uid" to uid, "general" to "1", "sys" to "1", "ls" to "1", "appType" to "15", "ut" to "s"))
-        if (page.contains("用户登录") || page.contains("passport2.chaoxing.com/login")) throw LoginRequired()
-        if (listOf("请先完成验证", "请完成安全验证", "请进行人脸识别").any(page::contains)) throw ApiProblem("需要官方验证，未提交签到。")
         revalidate()
         beforeCommit(); guard()
         val fields = linkedMapOf("activeId" to activity.id, "uid" to uid, "name" to name, "fid" to fid,

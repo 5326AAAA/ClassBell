@@ -48,6 +48,8 @@ class FeaturePermissionsPanel(private val activity: Activity) : LinearLayout(act
         addRow(extra, "锁屏提醒", fullscreen)
         addRow(extra, "定时测试", alarm)
         addRow(extra, "资料下载", text("仅访问所选文件夹，无需全部文件权限", 11))
+        addRow(extra, "作业日历", text("系统选择保存位置，无需日历权限", 11))
+        addRow(extra, "保存题图", text("点保存后下载；Android 8/9 需写入权限，新版免权限", 11))
         addRow(extra, "位置签到", text("暂不可用，无需提前开启定位", 11))
         addView(extra, LayoutParams(-1, -2))
     }

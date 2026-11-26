@@ -39,8 +39,14 @@ object ModernUi {
         val context = view.context
         val fill = when { textOnly -> Color.TRANSPARENT; inverted -> Color.WHITE; primaryAction -> primaryTint; else -> background }
         view.backgroundTintList = null
-        val enabledBackground = RippleDrawable(ColorStateList.valueOf(0x20146B53),
-            shape(context, fill, 14, if(!textOnly && !primaryAction && !inverted)border else null), shape(context, Color.WHITE, 14))
+        val outline=if(!textOnly && !primaryAction && !inverted)border else null
+        val pressedFill=if(primaryAction && !inverted)Color.rgb((Color.red(fill)*.70f).toInt(),(Color.green(fill)*.70f).toInt(),(Color.blue(fill)*.70f).toInt()) else soft
+        val surfaces=StateListDrawable().apply {
+            addState(intArrayOf(android.R.attr.state_pressed),shape(context,pressedFill,14,outline))
+            addState(intArrayOf(),shape(context,fill,14,outline))
+        }
+        val enabledBackground = RippleDrawable(ColorStateList.valueOf(if(primaryAction && !inverted)0x55001F17 else 0x30146B53),
+            surfaces, shape(context, Color.WHITE, 14))
         view.background = StateListDrawable().apply {
             addState(intArrayOf(-android.R.attr.state_enabled),
                 shape(context, if (textOnly) Color.TRANSPARENT else Color.rgb(233, 237, 235), 14))

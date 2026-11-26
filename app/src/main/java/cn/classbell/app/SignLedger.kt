@@ -56,6 +56,13 @@ class SignLedger(private val prefs: SharedPreferences) {
         if(attempted(identity,activity))releaseRejected(identity,activity)
         true
     }
+    /** Only an account-matched attendance query may unlock a manual photo retry. */
+    fun recoverUnsubmittedPhoto(identity:String,activity:SignActivity,result:SignOutcome):Boolean = synchronized(submissionState) {
+        if(identity.isBlank() || activity.otherId!=0 || result.successful || result.category!=SignResultCategory.NOT_SUBMITTED ||
+            flightKey(identity,activity) in submissionState.inFlight || accountKey(activity.key) in prefs.getStringSet("sign.confirmed.$identity",emptySet()).orEmpty())return@synchronized false
+        if(attempted(identity,activity))releaseRejected(identity,activity)
+        true
+    }
     private fun ignoreField(identity:String)="sign.ignored.$identity"
     private fun ignoredDetailsField(identity:String)="sign.ignoredDetails.$identity"
 

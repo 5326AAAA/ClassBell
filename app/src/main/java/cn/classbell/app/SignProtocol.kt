@@ -110,16 +110,17 @@ object SignProtocol {
             (!config.has("onlyAttendForCurrentClass") || config.optString("onlyAttendForCurrentClass") in disabled)
     }
     internal fun traceResponse(body:String,phase:String) {
-        val value=body.trim()
+        val value=body.trim().removePrefix("\uFEFF").trim()
         val data=if(value.startsWith("{"))try{JSONObject(value)}catch(_:Exception){null} else null
         val keys=data?.keys()?.asSequence()?.filter{it.matches(Regex("[A-Za-z_][A-Za-z0-9_]{0,40}"))}?.sorted()?.take(40)?.joinToString(",").orEmpty()
         val flags=listOf("result","status","errorCode").mapNotNull { key->
             data?.optString(key)?.takeIf{it in setOf("true","false","success","0","1","2","3","400","401","403","404","500") || (key=="errorCode" && it.matches(Regex("-?[0-9]{1,6}")))}?.let{"$key=$it"}
         }.joinToString(" ")
-        DiagnosticLog.event("SignResponse","phase=$phase chars=${value.length} shape=${when{value.startsWith("{")->"json_object";value.startsWith("<")->"html";else->"text"}} response_ref=${DiagnosticLog.reference(value)} fields=$keys $flags")
+        val hints=listOf("照片","图片","上传","过期","结束","验证","人脸","客户端").mapIndexedNotNull{index,word->if(value.contains(word))"h$index" else null}.joinToString(",")
+        DiagnosticLog.event("SignResponse","phase=$phase chars=${value.length} shape=${when{value.startsWith("{")->"json_object";value.startsWith("<")->"html";else->"text"}} response_ref=${DiagnosticLog.reference(value)} fields=$keys $flags hints=$hints")
     }
     fun outcome(body: String): SignOutcome {
-        val value=body.trim()
+        val value=body.trim().removePrefix("\uFEFF").trim()
         traceResponse(value,"submit")
         if(value in setOf("success","success2"))return SignOutcome(true,if(value=="success2")"签到成功（迟到）" else "签到成功")
         if(value in setOf("您已签到过了","你已经签到过了","您已签到","已签到"))return SignOutcome(true,"学习通返回已签到")
@@ -133,6 +134,8 @@ object SignProtocol {
                 SignOutcome(false,if(value.startsWith("二维码"))"二维码未被接受，请重新扫描当前码后再提交。" else "签到码或手势未被接受，请修改后再提交。",retryAllowed=true)
             listOf("设备","人数","上限","一人").any(value::contains)->SignOutcome(false,"学习通返回设备或人数限制，本次未确认成功。",SignResultCategory.SERVER_LIMIT)
             listOf("validate","验证码","人机","人脸").any{value.contains(it,true)}->SignOutcome(false,"需要官方验证，本次未继续提交。",SignResultCategory.VERIFICATION)
+            message.length<=256 && !message.contains('<') && Regex("(?:请(?:先)?(?:上传|选择|拍摄).*(?:照片|图片)|(?:照片|图片).*(?:未上传|未选择|不能为空|上传失败|格式不正确|不符合要求|无效))").containsMatchIn(message)->
+                SignOutcome(false,"照片未被接受，请重新选择符合本次要求的照片后提交。",SignResultCategory.FAILED,retryAllowed=true)
             Regex("(?:在|使用)学习通(?:客户端|App|内|中)?(?:完成)?签到",RegexOption.IGNORE_CASE).containsMatchIn(value)->SignOutcome(false,"待修复：服务器要求官方客户端能力，本次未确认成功。",SignResultCategory.NEEDS_FIX)
             listOf("签到码错误","签到码不正确","二维码已过期","签到已结束").any(value::contains)->SignOutcome(false,"签到码无效、已过期或签到已结束，请重新核对。",SignResultCategory.FAILED)
             else->SignOutcome(false,"结果待核实：服务器回复尚未识别，不自动重复提交。",SignResultCategory.UNKNOWN)

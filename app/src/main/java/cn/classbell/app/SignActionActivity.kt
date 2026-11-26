@@ -239,6 +239,11 @@ class SignActionActivity:StudyActivity() {
                 lastOutcome=null;qr=null;preparedQr=null
                 state.text="学习通确认未签到，可以重新扫描当前码立即提交。"
             }
+            if(!ended && plan?.mode==SignMode.PHOTO && lastOutcome?.successful!=true && submissionLocked() &&
+                ledger.recoverUnsubmittedPhoto(sessionOwner,sign.copy(otherId=0),result)) {
+                lastOutcome=null;clearPhoto()
+                state.text="学习通确认未签到，请重新选择符合要求的照片后再提交。"
+            }
             render()
             if(autoQrLoop && foreground && lastQrEnc!=null && !submissionLocked() && result.category==SignResultCategory.NOT_SUBMITTED) {
                 rejectedQrEnc=lastQrEnc;main.post{continueQrScan()}
@@ -309,6 +314,11 @@ class SignActionActivity:StudyActivity() {
                 if(!working && !submittingPhoto){clearPhoto();state.text="本次照片已移除，未上传。";render()}
             }.apply{isEnabled=!submittingPhoto})
             card.addView(StudyUi.button(this,"上传并签到",true){confirm()}.apply{isEnabled=!submittingPhoto})
+        }
+        if(app.boundAccounts.list().any{account->account.courses.any{it.key==sign.course.key}}) {
+            card.addView(StudyUi.button(this,"多账号分别选图签到"){
+                if(valid() && !working && !submittingPhoto)startActivity(MultiAccountSignActivity.intent(this,sign))
+            }.apply{isEnabled=!working && !submittingPhoto})
         }
     }
     private fun clearPhoto() {

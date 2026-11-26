@@ -172,7 +172,7 @@ class NativeMaterialUiTest {
             val request=shadowOf(activity).nextStartedActivityForResult
             shadowOf(activity).receiveResult(request.intent,Activity.RESULT_OK,Intent().putExtra(QrScanActivity.MATERIAL,raw))
             await{entered.size==5}
-            button("停止后续账号").performClick();await{finished.get()==5}
+            button("停止本次处理").performClick();await{finished.get()==5}
             assertEquals(5,entered.size);assertEquals(0,sent.get());assertTrue(text().contains("已停止后续处理"))
         }finally{gate.countDown();controller.pause().stop().destroy();app.prefs.edit().clear().commit()}
     }

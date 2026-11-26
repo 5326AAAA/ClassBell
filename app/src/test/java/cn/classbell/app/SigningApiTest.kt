@@ -186,4 +186,15 @@ class SigningApiTest {
             assertFalse(seen.any{it.url.host=="pan-yz.chaoxing.com" || it.url.encodedPath=="/pptSign/stuSignajax"})
         } finally {api.cancel();file.delete()}
     }
+    @Test fun officialPreSignVerificationStopsBeforeAnyPhotoUploadOrTokenRequest() {
+        val seen=mutableListOf<Request>()
+        val file=File.createTempFile("synthetic-photo-preflight-",".jpg").apply{writeBytes(byteArrayOf(1))}
+        val api=SigningApi(cookies,{}){request->seen+=request
+            if(request.url.encodedPath=="/newsign/preSign")"<html>请先完成验证</html>" else response(request,1)
+        }
+        try {
+            assertThrows(ApiProblem::class.java){api.submit(sign,file)}
+            assertFalse(seen.any{it.url.host=="pan-yz.chaoxing.com" || it.url.encodedPath=="/pptSign/stuSignajax"})
+        }finally{api.cancel();file.delete()}
+    }
 }
